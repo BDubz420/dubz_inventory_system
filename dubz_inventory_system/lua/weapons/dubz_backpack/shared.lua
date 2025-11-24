@@ -2,7 +2,7 @@ AddCSLuaFile()
 
 SWEP.PrintName = "Dubz Backpack"
 SWEP.Author = "Dubz"
-SWEP.Instructions = "Primary: place backpack | Secondary: open inventory"
+SWEP.Instructions = "Right click to place the backpack"
 SWEP.Spawnable = false
 SWEP.AdminOnly = false
 SWEP.Category = "Dubz Utilities"
@@ -39,10 +39,20 @@ end
 function SWEP:PrimaryAttack()
     if CLIENT then return end
 
+    self:SetNextPrimaryFire(CurTime() + 0.6)
+
     local owner = self:GetOwner()
     if not IsValid(owner) then return end
 
-    self:SetNextPrimaryFire(CurTime() + 1)
+    owner:ChatPrint("Right click to place the backpack")
+end
+
+function SWEP:SecondaryAttack()
+    if CLIENT then return end
+    self:SetNextSecondaryFire(CurTime() + 1)
+
+    local owner = self:GetOwner()
+    if not IsValid(owner) then return end
 
     local tr = util.TraceHull({
         start = owner:EyePos(),
@@ -52,7 +62,7 @@ function SWEP:PrimaryAttack()
         filter = owner
     })
 
-    if not tr.Hit then
+    if not tr.Hit or not tr.HitWorld and not IsValid(tr.Entity) then
         owner:ChatPrint("Aim at the ground to place the backpack.")
         return
     end
@@ -69,20 +79,10 @@ function SWEP:PrimaryAttack()
     owner:StripWeapon(self:GetClass())
 end
 
-function SWEP:SecondaryAttack()
-    if CLIENT then return end
-    self:SetNextSecondaryFire(CurTime() + 0.5)
-
-    local owner = self:GetOwner()
-    if not IsValid(owner) then return end
-
-    DUBZ_BACKPACK.SendInventory(owner, self, "weapon")
-end
-
 function SWEP:Reload()
     if CLIENT then return end
     local owner = self:GetOwner()
     if not IsValid(owner) then return end
 
-    owner:ChatPrint("Primary: place backpack | Secondary: open inventory")
+    owner:ChatPrint("Right click to place the backpack")
 end

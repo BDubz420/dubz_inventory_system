@@ -8,11 +8,44 @@ DUBZ_BACKPACK.Config = {
     Category = "Dubz Utilities",
     ColorPrimary = Color(18, 18, 28),
     ColorPanel = Color(28, 28, 40),
-    ColorAccent = Color(140, 90, 255),
-    ColorMuted = Color(180, 180, 195)
+    ColorAccent = Color(80, 145, 255),
+    ColorMuted = Color(180, 180, 195),
+
+    -- Leave AllowedWeapons / AllowedEntities empty to permit any class.
+    AllowedWeapons = {
+        -- "stunstick",
+        -- "weapon_arrest_stick",
+    },
+
+    AllowedEntities = {
+        -- "spawned_money",
+    }
 }
 
 local config = DUBZ_BACKPACK.Config
+
+local function asLookup(tbl)
+    local map = {}
+    for _, class in ipairs(tbl or {}) do
+        map[class] = true
+    end
+    return map
+end
+
+config.AllowedWeaponLookup = asLookup(config.AllowedWeapons)
+config.AllowedEntityLookup = asLookup(config.AllowedEntities)
+
+function DUBZ_BACKPACK.IsWeaponAllowed(class)
+    if not class or class == "" then return false end
+    if not config.AllowedWeapons or #config.AllowedWeapons == 0 then return true end
+    return config.AllowedWeaponLookup[class] or false
+end
+
+function DUBZ_BACKPACK.IsEntityAllowed(class)
+    if not class or class == "" then return false end
+    if not config.AllowedEntities or #config.AllowedEntities == 0 then return true end
+    return config.AllowedEntityLookup[class] or false
+end
 
 if SERVER then
     util.AddNetworkString("DubzBackpack_Open")
@@ -27,6 +60,7 @@ if SERVER then
 
     function DUBZ_BACKPACK.SendInventory(ply, container, containerType)
         if not IsValid(ply) or not IsValid(container) then return end
+        if container:IsWeapon() then return end
         local items = DUBZ_BACKPACK.GetItems(container)
 
         net.Start("DubzBackpack_Open")
@@ -43,9 +77,6 @@ if SERVER then
 
     local function canInteract(ply, container)
         if not (IsValid(ply) and IsValid(container)) then return false end
-        if container:IsWeapon() then
-            return container:GetOwner() == ply
-        end
         return ply:GetPos():DistToSqr(container:GetPos()) <= (200 * 200)
     end
 
@@ -67,6 +98,11 @@ if SERVER then
         if not canInteract(ply, container) then return end
         if class == "" or class == container:GetClass() then return end
 
+        if not DUBZ_BACKPACK.IsWeaponAllowed(class) then
+            ply:ChatPrint("You can't store that weapon in this backpack.")
+            return
+        end
+
         local items = DUBZ_BACKPACK.GetItems(container)
         if #items >= config.Capacity then
             ply:ChatPrint("This backpack is full!")
@@ -77,6 +113,8 @@ if SERVER then
 
         local wep = ply:GetWeapon(class)
         if not IsValid(wep) then return end
+
+        if container:IsWeapon() then return end
 
         table.insert(items, {
             class = class,
@@ -93,6 +131,7 @@ if SERVER then
         local index = net.ReadUInt(8)
 
         if not canInteract(ply, container) then return end
+        if container:IsWeapon() then return end
 
         local items = DUBZ_BACKPACK.GetItems(container)
         local data = items[index]
@@ -107,6 +146,27 @@ if SERVER then
 
         table.remove(items, index)
         DUBZ_BACKPACK.SendInventory(ply, container, containerType)
+    end)
+
+    local pickupRangeSqr = 200 * 200
+
+    hook.Add("KeyPress", "DubzBackpack_PickupSecondary", function(ply, key)
+        if key ~= IN_ATTACK2 then return end
+        if not IsValid(ply) or ply:HasWeapon("dubz_backpack") then return end
+
+        local tr = util.TraceLine({
+            start = ply:EyePos(),
+            endpos = ply:EyePos() + ply:GetAimVector() * 90,
+            filter = ply
+        })
+
+        local ent = tr.Entity
+        if not IsValid(ent) or ent:GetClass() ~= "dubz_backpack" then return end
+        if ply:GetPos():DistToSqr(ent:GetPos()) > pickupRangeSqr then return end
+
+        if ent.PickupIntoWeapon then
+            ent:PickupIntoWeapon(ply)
+        end
     end)
 
     if DarkRP and DarkRP.createEntity then

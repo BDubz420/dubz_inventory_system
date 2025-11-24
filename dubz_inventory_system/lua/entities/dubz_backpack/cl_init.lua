@@ -22,6 +22,6 @@ function ENT:Draw()
         surface.DrawRect(-120, -20, 10, 80)
 
         draw.SimpleText("Dubz Backpack", "DermaLarge", 0, 5, muted, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
-        draw.SimpleText("Use: open | Crouch+Use: pick up", "DermaDefaultBold", 0, 40, muted, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+        draw.SimpleText("Use: open | Right Click: pick up", "DermaDefaultBold", 0, 40, muted, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
     cam.End3D2D()
 end

@@ -21,12 +21,6 @@ end
 
 function ENT:Use(activator)
     if not IsValid(activator) or not activator:IsPlayer() then return end
-
-    if activator:Crouching() then
-        self:PickupIntoWeapon(activator)
-        return
-    end
-
     DUBZ_BACKPACK.SendInventory(activator, self, "entity")
 end
 

@@ -148,8 +148,9 @@ local function openInventory(containerType, container, capacity, items)
     combo:SetTextColor(muted)
 
     for _, wep in ipairs(LocalPlayer():GetWeapons()) do
-        if wep:GetClass() ~= "dubz_backpack" then
-            combo:AddChoice((wep.PrintName or wep:GetClass()) .. " (" .. wep:GetClass() .. ")", wep:GetClass())
+        local class = wep:GetClass()
+        if class ~= "dubz_backpack" and (not DUBZ_BACKPACK or not DUBZ_BACKPACK.IsWeaponAllowed or DUBZ_BACKPACK.IsWeaponAllowed(class)) then
+            combo:AddChoice((wep.PrintName or class) .. " (" .. class .. ")", class)
         end
     end
 
