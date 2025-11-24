@@ -1,0 +1,11 @@
+ENT.Type = "anim"
+ENT.Base = "base_anim"
+ENT.PrintName = "Dubz Backpack"
+ENT.Author = "Dubz"
+ENT.Category = "Dubz Utilities"
+ENT.Spawnable = true
+ENT.RenderGroup = RENDERGROUP_OPAQUE
+ENT.AutomaticFrameAdvance = true
+ENT.DisableDuplicator = false
+ENT.Model = "models/props_c17/BriefCase001a.mdl"
+ENT.UseType = SIMPLE_USE
