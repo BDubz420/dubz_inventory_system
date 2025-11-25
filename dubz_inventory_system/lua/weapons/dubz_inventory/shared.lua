@@ -51,8 +51,30 @@ if SERVER then
         return swep.StoredItems
     end
 
+    local function subMaterialsMatch(a, b)
+        if (not a) and (not b) then return true end
+        if (not a) or (not b) then return false end
+        if table.Count(a) ~= table.Count(b) then return false end
+
+        for idx, mat in pairs(a) do
+            if b[idx] ~= mat then
+                return false
+            end
+        end
+
+        return true
+    end
+
     function DUBZ_INVENTORY.CanStack(a, b)
-        return a and b and a.class == b.class and a.model == b.model and a.itemType == b.itemType
+        if not (a and b) then return false end
+        if a.class ~= b.class or a.model ~= b.model or a.itemType ~= b.itemType then return false end
+        if a.material ~= b.material then return false end
+        if not subMaterialsMatch(a.subMaterials, b.subMaterials) then return false end
+
+        -- Do not stack unique-state entities so we never lose their stored data
+        if a.entState or b.entState then return false end
+
+        return true
     end
 
     function DUBZ_INVENTORY.AddItem(swep, itemData)
@@ -141,6 +163,46 @@ if SERVER then
         return false
     end
 
+    local function captureSubMaterials(ent)
+        local mats = ent:GetMaterials()
+        if not mats or #mats == 0 then return nil end
+
+        local subs = {}
+        for i = 0, #mats do
+            local sub = ent:GetSubMaterial(i)
+            if sub and sub ~= "" then
+                subs[i] = sub
+            end
+        end
+
+        if table.IsEmpty(subs) then return nil end
+        return subs
+    end
+
+    local function captureEntityState(ent)
+        local dupe = duplicator and duplicator.CopyEntTable and duplicator.CopyEntTable(ent)
+        local mods
+        if duplicator and duplicator.CopyEntTable and ent.EntityMods then
+            mods = duplicator.CopyEntTable(ent.EntityMods)
+        end
+
+        local material = ent:GetMaterial()
+        local subMats = captureSubMaterials(ent)
+        local skin = ent:GetSkin()
+
+        if (not dupe or table.IsEmpty(dupe)) and (not mods or table.IsEmpty(mods)) and (not material or material == "") and (not subMats) and (not skin or skin == 0) then
+            return nil
+        end
+
+        return {
+            dupe = dupe,
+            mods = mods,
+            skin = skin,
+            material = material,
+            subMaterials = subMats
+        }
+    end
+
     local function weaponData(ent)
         local class = ent:GetClass()
         return {
@@ -148,7 +210,11 @@ if SERVER then
             name = ent.PrintName or class,
             model = ent.WorldModel or ent:GetModel(),
             quantity = 1,
-            itemType = "weapon"
+            itemType = "weapon",
+            clip1 = ent:Clip1(),
+            clip2 = ent:Clip2(),
+            ammoType1 = ent:GetPrimaryAmmoType(),
+            ammoType2 = ent:GetSecondaryAmmoType()
         }
     end
 
@@ -159,7 +225,10 @@ if SERVER then
             name = ent.PrintName or class,
             model = ent:GetModel(),
             quantity = 1,
-            itemType = "entity"
+            itemType = "entity",
+            material = ent:GetMaterial(),
+            subMaterials = captureSubMaterials(ent),
+            entState = captureEntityState(ent)
         }
     end
 
@@ -234,6 +303,8 @@ if SERVER then
         end
 
         sendTip(ply, string.format("Dropped %s", removed.name or "item"))
+
+        DUBZ_INVENTORY.OpenFor(ply, swep)
     end
 
     function SWEP:SecondaryAttack()
@@ -261,6 +332,14 @@ if SERVER then
             net.WriteString(data.model or "")
             net.WriteUInt(math.Clamp(data.quantity or 1, 1, 65535), 16)
             net.WriteString(data.itemType or "entity")
+            net.WriteString(data.material or "")
+
+            local subMats = data.subMaterials or {}
+            net.WriteUInt(math.min(table.Count(subMats), 16), 5)
+            for idx, mat in pairs(subMats) do
+                net.WriteUInt(idx, 5)
+                net.WriteString(mat)
+            end
         end
         net.Send(ply)
     end
@@ -274,6 +353,46 @@ if SERVER then
         ent:SetAngles(Angle(0, ply:EyeAngles().yaw, 0))
         ent:Spawn()
         ent:Activate()
+
+        if data.itemType == "weapon" then
+            if data.clip1 then
+                ent:SetClip1(data.clip1)
+            end
+            if data.clip2 then
+                ent:SetClip2(data.clip2)
+            end
+        end
+
+        local material = data.material or (data.entState and data.entState.material)
+        local subMaterials = data.subMaterials or (data.entState and data.entState.subMaterials)
+
+        if material and material ~= "" then
+            ent:SetMaterial(material)
+        end
+
+        if subMaterials then
+            for idx, mat in pairs(subMaterials) do
+                ent:SetSubMaterial(idx, mat)
+            end
+        end
+
+        if data.entState and data.entState.dupe and duplicator and duplicator.DoGeneric then
+            duplicator.DoGeneric(ent, data.entState.dupe)
+        end
+
+        if data.entState and data.entState.skin then
+            ent:SetSkin(data.entState.skin)
+        end
+
+        ent:SetPos(pos)
+        ent:SetAngles(Angle(0, ply:EyeAngles().yaw, 0))
+
+        if data.entState and data.entState.mods and duplicator and duplicator.ApplyEntityModifier then
+            for mod, info in pairs(data.entState.mods) do
+                duplicator.ApplyEntityModifier(ply, ent, mod, info)
+            end
+        end
+
         return true
     end
 
@@ -297,6 +416,14 @@ if SERVER then
                 local given = ply:Give(removed.class)
                 if IsValid(given) then
                     given.PrintName = removed.name
+                    if removed.clip1 then given:SetClip1(removed.clip1) end
+                    if removed.clip2 then given:SetClip2(removed.clip2) end
+                    if removed.ammoType1 and removed.clip1 and removed.clip1 > 0 then
+                        ply:GiveAmmo(removed.clip1, removed.ammoType1)
+                    end
+                    if removed.ammoType2 and removed.clip2 and removed.clip2 > 0 then
+                        ply:GiveAmmo(removed.clip2, removed.ammoType2)
+                    end
                     sendTip(ply, "Equipped " .. removed.name)
                 end
             else
@@ -445,6 +572,21 @@ if CLIENT then
             surface.DrawOutlinedRect(0, 0, w, h, 1)
         end
 
+        if (data.material and data.material ~= "") or data.subMaterials then
+            timer.Simple(0, function()
+                if not (IsValid(icon) and IsValid(icon.Entity)) then return end
+                if data.material and data.material ~= "" then
+                    icon.Entity:SetMaterial(data.material)
+                end
+
+                if data.subMaterials then
+                    for idx, mat in pairs(data.subMaterials) do
+                        icon.Entity:SetSubMaterial(idx, mat)
+                    end
+                end
+            end)
+        end
+
         icon.DoClick = function()
             sendAction(swep, index, "use", 1)
         end
@@ -494,60 +636,99 @@ if CLIENT then
         local count = net.ReadUInt(8)
         local items = {}
         for i = 1, count do
+            local subMaterialCount
+            local subMaterials = {}
+
             items[i] = {
                 class = net.ReadString(),
                 name = net.ReadString(),
                 model = net.ReadString(),
                 quantity = net.ReadUInt(16),
-                itemType = net.ReadString()
+                itemType = net.ReadString(),
+                material = net.ReadString()
             }
+
+            subMaterialCount = net.ReadUInt(5)
+            for _ = 1, subMaterialCount do
+                local idx = net.ReadUInt(5)
+                subMaterials[idx] = net.ReadString()
+            end
+
+            if not table.IsEmpty(subMaterials) then
+                items[i].subMaterials = subMaterials
+            end
         end
 
         if not IsValid(swep) then return end
 
-        local frame = vgui.Create("DFrame")
-        frame:SetSize(700, 520)
-        frame:Center()
-        frame:MakePopup()
-        frame:SetTitle("")
-        frame:ShowCloseButton(false)
-        frame.Paint = function(self, w, h)
-            draw.RoundedBox(12, 0, 0, w, h, bg)
-            draw.SimpleText("Dubz Inventory", "DubzInv_Title", 14, 10, textColor)
-            draw.SimpleText(string.format("%d / %d stacks", #items, config.Capacity), "DubzInv_Button", 16, 42, ColorAlpha(textColor, 180))
-            surface.SetDrawColor(accent)
-            surface.DrawRect(0, 0, w, 3)
+        local frames = DUBZ_INVENTORY.ActiveFrames or {}
+
+        local function ensureFrame()
+            if IsValid(frames[swep]) then return frames[swep] end
+
+            local frame = vgui.Create("DFrame")
+            frame:SetSize(700, 520)
+            frame:Center()
+            frame:MakePopup()
+            frame:SetTitle("")
+            frame:ShowCloseButton(false)
+            frame.Paint = function(self, w, h)
+                draw.RoundedBox(12, 0, 0, w, h, bg)
+                draw.SimpleText("Dubz Inventory", "DubzInv_Title", 14, 10, textColor)
+                draw.SimpleText(string.format("%d / %d stacks", self.ItemCount or 0, config.Capacity), "DubzInv_Button", 16, 42, ColorAlpha(textColor, 180))
+                surface.SetDrawColor(accent)
+                surface.DrawRect(0, 0, w, 3)
+            end
+
+            local close = vgui.Create("DButton", frame)
+            close:SetText("✕")
+            close:SetFont("DubzInv_Title")
+            close:SetTextColor(textColor)
+            close:SetSize(34, 34)
+            close:SetPos(frame:GetWide() - 44, 10)
+            close.Paint = function(self, w, h)
+                draw.RoundedBox(8, 0, 0, w, h, panelCol)
+            end
+            close.DoClick = function()
+                frame:Close()
+            end
+
+            frame.OnClose = function()
+                frames[swep] = nil
+            end
+
+            local body = vgui.Create("DPanel", frame)
+            body:Dock(FILL)
+            body:DockMargin(12, 70, 12, 12)
+            body.Paint = nil
+
+            local info = vgui.Create("DLabel", body)
+            info:Dock(TOP)
+            info:SetTall(26)
+            info:SetFont("DubzInv_Button")
+            info:SetTextColor(ColorAlpha(textColor, 180))
+            info:SetText("Left click items on the ground to store them. Secondary drops last. Reload opens this menu.")
+            frame.Info = info
+
+            local grid = buildSection(body, "Inventory")
+            frame.Grid = grid
+
+            frame.Refresh = function(self, itemList)
+                self.ItemCount = #itemList
+                self.Grid:Clear()
+                for idx, data in ipairs(itemList) do
+                    addItemIcon(self.Grid, data, idx, swep)
+                end
+            end
+
+            frames[swep] = frame
+            return frame
         end
 
-        local close = vgui.Create("DButton", frame)
-        close:SetText("✕")
-        close:SetFont("DubzInv_Title")
-        close:SetTextColor(textColor)
-        close:SetSize(34, 34)
-        close:SetPos(frame:GetWide() - 44, 10)
-        close.Paint = function(self, w, h)
-            draw.RoundedBox(8, 0, 0, w, h, panelCol)
-        end
-        close.DoClick = function()
-            frame:Close()
-        end
-
-        local body = vgui.Create("DPanel", frame)
-        body:Dock(FILL)
-        body:DockMargin(12, 70, 12, 12)
-        body.Paint = nil
-
-        local info = vgui.Create("DLabel", body)
-        info:Dock(TOP)
-        info:SetTall(26)
-        info:SetFont("DubzInv_Button")
-        info:SetTextColor(ColorAlpha(textColor, 180))
-        info:SetText("Left click items on the ground to store them. Secondary drops last. Reload opens this menu.")
-
-        local grid = buildSection(body, "Inventory")
-
-        for idx, data in ipairs(items) do
-            addItemIcon(grid, data, idx, swep)
+        local frame = ensureFrame()
+        DUBZ_INVENTORY.ActiveFrames = frames
+        if IsValid(frame) then
+            frame:Refresh(items)
         end
     end)
 end
