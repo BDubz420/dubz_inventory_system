@@ -4,7 +4,7 @@ DUBZ_INVENTORY = DUBZ_INVENTORY or {}
 
 SWEP.PrintName = "Dubz Inventory"
 SWEP.Author = "BDubz"
-SWEP.Instructions = "Primary: Pick up    Secondary: Open inventory"
+SWEP.Instructions = "Primary: Pick up    Secondary: Drop last    Reload: Open inventory"
 SWEP.Category = (DUBZ_INVENTORY and DUBZ_INVENTORY.Config.Category) or "Dubz Utilities"
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
@@ -177,7 +177,6 @@ if SERVER then
 
         ent:Remove()
         sendTip(ply, string.format("Stored %s", item.name))
-        DUBZ_INVENTORY.OpenFor(ply, swep)
     end
 
     function SWEP:PrimaryAttack()
@@ -185,7 +184,33 @@ if SERVER then
         storePickup(self:GetOwner(), self, traceTarget(self:GetOwner()))
     end
 
+    local function dropLast(ply, swep)
+        local items = cleanItems(swep)
+        local count = #items
+        if count <= 0 then
+            sendTip(ply, "No items to drop")
+            return
+        end
+
+        local data = items[count]
+        local removed = DUBZ_INVENTORY.RemoveItem(swep, count, data.quantity or 1)
+        if not removed then return end
+
+        removed.quantity = removed.quantity or 1
+        for _ = 1, removed.quantity do
+            spawnWorldItem(ply, removed)
+        end
+
+        sendTip(ply, string.format("Dropped %s", removed.name or "item"))
+    end
+
     function SWEP:SecondaryAttack()
+        self:SetNextSecondaryFire(CurTime() + 0.25)
+        dropLast(self:GetOwner(), self)
+    end
+
+    function SWEP:Reload()
+        self:SetNextPrimaryFire(CurTime() + 0.25)
         self:SetNextSecondaryFire(CurTime() + 0.25)
         DUBZ_INVENTORY.OpenFor(self:GetOwner(), self)
     end
@@ -304,6 +329,13 @@ if CLIENT then
     local accent = config.ColorAccent or Color(25, 178, 208)
     local textColor = config.ColorText or Color(230, 234, 242)
 
+    function SWEP:DrawHUD()
+        local x, y = ScrW() / 2, ScrH() / 2
+        surface.SetDrawColor(accent)
+        surface.DrawCircle(x, y, 4, accent)
+        surface.DrawCircle(x, y, 8, ColorAlpha(accent, 160))
+    end
+
     surface.CreateFont("DubzInv_Title", {
         font = "Montserrat",
         size = 22,
@@ -341,7 +373,7 @@ if CLIENT then
         wrap.Paint = function(self, w, h)
             drawPanelOutline(w, h)
             draw.SimpleText(header, "DubzInv_Label", 12, 10, textColor, TEXT_ALIGN_LEFT, TEXT_ALIGN_TOP)
-            draw.SimpleText("Left click to use, right click for options", "DubzInv_Small", 14, 32, ColorAlpha(textColor, 160), TEXT_ALIGN_LEFT, TEXT_ALIGN_TOP)
+            draw.SimpleText("Right click items for options", "DubzInv_Small", 14, 32, ColorAlpha(textColor, 160), TEXT_ALIGN_LEFT, TEXT_ALIGN_TOP)
         end
 
         local layout = vgui.Create("DIconLayout", wrap)
@@ -478,7 +510,7 @@ if CLIENT then
         info:SetTall(26)
         info:SetFont("DubzInv_Button")
         info:SetTextColor(ColorAlpha(textColor, 180))
-        info:SetText("Left click items on the ground to store them. Secondary opens this menu.")
+        info:SetText("Left click items on the ground to store them. Secondary drops last. Reload opens this menu.")
 
         local grid = buildSection(body, "Inventory")
 
