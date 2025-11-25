@@ -71,6 +71,8 @@ if SERVER then
         if a.material ~= b.material then return false end
         if not subMaterialsMatch(a.subMaterials, b.subMaterials) then return false end
 
+        if (a.weaponClass or b.weaponClass) and a.weaponClass ~= b.weaponClass then return false end
+
         -- Do not stack unique-state entities so we never lose their stored data
         if a.entState or b.entState then return false end
 
@@ -218,6 +220,31 @@ if SERVER then
         }
     end
 
+    local function spawnedWeaponData(ent)
+        local weaponClass = (ent.GetWeaponClass and ent:GetWeaponClass()) or ent.weaponClass or ent.weaponclass or
+            ent:GetNWString("weaponclass", ent:GetNWString("WeaponClass", ""))
+
+        local stored = weaponClass ~= "" and weapons.GetStored(weaponClass)
+        local name = (stored and stored.PrintName) or ent.PrintName or weaponClass or "Weapon"
+        local model = ent:GetModel() or (stored and stored.WorldModel) or "models/weapons/w_pist_deagle.mdl"
+
+        local clip1 = ent.clip1 or (ent.GetNWInt and ent:GetNWInt("clip1")) or ent.clip1 or 0
+        local clip2 = ent.clip2 or (ent.GetNWInt and ent:GetNWInt("clip2")) or ent.clip2 or 0
+        local ammoAdd = ent.ammoadd or (ent.GetNWInt and ent:GetNWInt("ammoadd"))
+
+        return {
+            class = ent:GetClass(),
+            weaponClass = weaponClass ~= "" and weaponClass or nil,
+            name = name,
+            model = model,
+            quantity = 1,
+            itemType = "weapon",
+            clip1 = clip1,
+            clip2 = clip2,
+            ammoAdd = ammoAdd
+        }
+    end
+
     local function entityData(ent)
         local class = ent:GetClass()
         return {
@@ -258,7 +285,13 @@ if SERVER then
         end
 
         local item
-        if ent:IsWeapon() then
+        if ent:GetClass() == "spawned_weapon" then
+            item = spawnedWeaponData(ent)
+            if not item.weaponClass then
+                sendTip(ply, "This weapon has no class data")
+                return
+            end
+        elseif ent:IsWeapon() then
             if ent:GetOwner() == ply then
                 sendTip(ply, "Drop the weapon first")
                 return
@@ -284,15 +317,44 @@ if SERVER then
         if not (IsValid(ply) and data and data.class) then return false end
 
         local pos = ply:EyePos() + ply:EyeAngles():Forward() * 30
+        local ang = Angle(0, ply:EyeAngles().yaw, 0)
         local ent = ents.Create(data.class)
+
         if not IsValid(ent) then return false end
 
+        if data.class == "spawned_weapon" then
+            if not data.weaponClass then return false end
+
+            if ent.SetWeaponClass then
+                ent:SetWeaponClass(data.weaponClass)
+            else
+                ent.weaponClass = data.weaponClass
+                ent.weaponclass = data.weaponClass
+            end
+
+            ent:SetNWString("weaponclass", data.weaponClass)
+            ent:SetNWString("WeaponClass", data.weaponClass)
+
+            if data.model then
+                ent:SetModel(data.model)
+            end
+
+            ent.clip1 = data.clip1
+            ent.clip2 = data.clip2
+            ent.ammoadd = data.ammoAdd
+            ent:SetNWInt("clip1", data.clip1 or 0)
+            ent:SetNWInt("clip2", data.clip2 or 0)
+            if data.ammoAdd then
+                ent:SetNWInt("ammoadd", data.ammoAdd)
+            end
+        end
+
         ent:SetPos(pos)
-        ent:SetAngles(Angle(0, ply:EyeAngles().yaw, 0))
+        ent:SetAngles(ang)
         ent:Spawn()
         ent:Activate()
 
-        if data.itemType == "weapon" then
+        if data.itemType == "weapon" and ent:IsWeapon() then
             if data.clip1 then
                 ent:SetClip1(data.clip1)
             end
@@ -328,7 +390,19 @@ if SERVER then
             end
         end
 
-        return true
+        local phys = ent:GetPhysicsObject()
+        if not IsValid(phys) then
+            ent:PhysicsInit(SOLID_VPHYSICS)
+            ent:SetMoveType(MOVETYPE_VPHYSICS)
+            ent:SetSolid(SOLID_VPHYSICS)
+            phys = ent:GetPhysicsObject()
+        end
+
+        if IsValid(phys) then
+            phys:Wake()
+        end
+
+        return IsValid(ent)
     end
 
     function SWEP:PrimaryAttack()
@@ -406,58 +480,6 @@ if SERVER then
         net.Send(ply)
     end
 
-    function spawnWorldItem(ply, data)
-        local pos = ply:EyePos() + ply:EyeAngles():Forward() * 30
-        local ent = ents.Create(data.class)
-        if not IsValid(ent) then return false end
-
-        ent:SetPos(pos)
-        ent:SetAngles(Angle(0, ply:EyeAngles().yaw, 0))
-        ent:Spawn()
-        ent:Activate()
-
-        if data.itemType == "weapon" then
-            if data.clip1 then
-                ent:SetClip1(data.clip1)
-            end
-            if data.clip2 then
-                ent:SetClip2(data.clip2)
-            end
-        end
-
-        local material = data.material or (data.entState and data.entState.material)
-        local subMaterials = data.subMaterials or (data.entState and data.entState.subMaterials)
-
-        if material and material ~= "" then
-            ent:SetMaterial(material)
-        end
-
-        if subMaterials then
-            for idx, mat in pairs(subMaterials) do
-                ent:SetSubMaterial(idx, mat)
-            end
-        end
-
-        if data.entState and data.entState.dupe and duplicator and duplicator.DoGeneric then
-            duplicator.DoGeneric(ent, data.entState.dupe)
-        end
-
-        if data.entState and data.entState.skin then
-            ent:SetSkin(data.entState.skin)
-        end
-
-        ent:SetPos(pos)
-        ent:SetAngles(Angle(0, ply:EyeAngles().yaw, 0))
-
-        if data.entState and data.entState.mods and duplicator and duplicator.ApplyEntityModifier then
-            for mod, info in pairs(data.entState.mods) do
-                duplicator.ApplyEntityModifier(ply, ent, mod, info)
-            end
-        end
-
-        return true
-    end
-
     net.Receive("DubzInventory_Action", function(_, ply)
         local swep = net.ReadEntity()
         local index = net.ReadUInt(8)
@@ -475,7 +497,8 @@ if SERVER then
             if not removed then return end
 
             if removed.itemType == "weapon" then
-                local given = ply:Give(removed.class)
+                local giveClass = removed.weaponClass or removed.class
+                local given = giveClass and ply:Give(giveClass)
                 if IsValid(given) then
                     given.PrintName = removed.name
                     if removed.clip1 then given:SetClip1(removed.clip1) end
@@ -485,6 +508,9 @@ if SERVER then
                     end
                     if removed.ammoType2 and removed.clip2 and removed.clip2 > 0 then
                         ply:GiveAmmo(removed.clip2, removed.ammoType2)
+                    end
+                    if removed.ammoAdd and given:GetPrimaryAmmoType() >= 0 then
+                        ply:GiveAmmo(removed.ammoAdd, given:GetPrimaryAmmoType())
                     end
                     sendTip(ply, "Equipped " .. removed.name)
                 end
