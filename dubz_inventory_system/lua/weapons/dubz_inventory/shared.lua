@@ -45,6 +45,8 @@ if SERVER then
         self.StoredItems = {}
     end
 
+    local spawnWorldItem
+
     local function cleanItems(swep)
         if not IsValid(swep) then return {} end
         swep.StoredItems = swep.StoredItems or {}
@@ -344,7 +346,7 @@ if SERVER then
         net.Send(ply)
     end
 
-    local function spawnWorldItem(ply, data)
+    function spawnWorldItem(ply, data)
         local pos = ply:EyePos() + ply:EyeAngles():Forward() * 30
         local ent = ents.Create(data.class)
         if not IsValid(ent) then return false end
