@@ -114,6 +114,33 @@ if SERVER then
         return IsValid(ply) and IsValid(swep) and swep:GetOwner() == ply and swep:GetClass() == "dubz_inventory"
     end
 
+    local function pocketBlacklist()
+        if DarkRP and DarkRP.getPocketBlacklist then
+            return DarkRP.getPocketBlacklist() or {}
+        end
+
+        if GAMEMODE and GAMEMODE.Config and GAMEMODE.Config.PocketBlacklist then
+            return GAMEMODE.Config.PocketBlacklist
+        end
+
+        return {}
+    end
+
+    local function isPocketBlacklisted(class)
+        local blacklist = pocketBlacklist()
+        if not blacklist then return false end
+
+        if blacklist[class] then return true end
+
+        for _, value in ipairs(blacklist) do
+            if value == class then
+                return true
+            end
+        end
+
+        return false
+    end
+
     local function weaponData(ent)
         local class = ent:GetClass()
         return {
@@ -156,6 +183,11 @@ if SERVER then
             return
         end
 
+        if isPocketBlacklisted(ent:GetClass()) then
+            sendTip(ply, "This item is pocket blacklisted")
+            return
+        end
+
         local item
         if ent:IsWeapon() then
             if ent:GetOwner() == ply then
@@ -163,7 +195,7 @@ if SERVER then
                 return
             end
             item = weaponData(ent)
-        elseif config.PocketWhitelist[ent:GetClass()] then
+        elseif next(config.PocketWhitelist) == nil or config.PocketWhitelist[ent:GetClass()] then
             item = entityData(ent)
         else
             sendTip(ply, "Item is not allowed in this inventory")

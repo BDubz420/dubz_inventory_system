@@ -7,10 +7,9 @@ DUBZ_INVENTORY.Config = {
     ColorPanel = Color(24, 28, 38),
     ColorAccent = Color(25, 178, 208),
     ColorText = Color(230, 234, 242),
-    PocketWhitelist = {
-        ["weapon_frag"] = true,
-        ["weapon_slam"] = true,
-        ["item_ammo_pistol"] = true
-    }
+    -- Optional: if you want to restrict what non-weapon entities can be stored,
+    -- add them to PocketWhitelist. DarkRP's pocket blacklist is always honored
+    -- and will block anything defined there.
+    PocketWhitelist = {}
 }
 
