@@ -45,8 +45,6 @@ if SERVER then
         self.StoredItems = {}
     end
 
-    local spawnWorldItem
-
     local function cleanItems(swep)
         if not IsValid(swep) then return {} end
         swep.StoredItems = swep.StoredItems or {}
@@ -282,6 +280,57 @@ if SERVER then
         sendTip(ply, string.format("Stored %s", item.name))
     end
 
+    local function spawnWorldItem(ply, data)
+        if not (IsValid(ply) and data and data.class) then return false end
+
+        local pos = ply:EyePos() + ply:EyeAngles():Forward() * 30
+        local ent = ents.Create(data.class)
+        if not IsValid(ent) then return false end
+
+        ent:SetPos(pos)
+        ent:SetAngles(Angle(0, ply:EyeAngles().yaw, 0))
+        ent:Spawn()
+        ent:Activate()
+
+        if data.itemType == "weapon" then
+            if data.clip1 then
+                ent:SetClip1(data.clip1)
+            end
+            if data.clip2 then
+                ent:SetClip2(data.clip2)
+            end
+        end
+
+        local material = data.material or (data.entState and data.entState.material)
+        local subMaterials = data.subMaterials or (data.entState and data.entState.subMaterials)
+
+        if material and material ~= "" then
+            ent:SetMaterial(material)
+        end
+
+        if subMaterials then
+            for idx, mat in pairs(subMaterials) do
+                ent:SetSubMaterial(idx, mat)
+            end
+        end
+
+        if data.entState and data.entState.dupe and duplicator and duplicator.DoGeneric then
+            duplicator.DoGeneric(ent, data.entState.dupe)
+        end
+
+        if data.entState and data.entState.skin then
+            ent:SetSkin(data.entState.skin)
+        end
+
+        if data.entState and data.entState.mods and duplicator and duplicator.ApplyEntityModifier then
+            for mod, info in pairs(data.entState.mods) do
+                duplicator.ApplyEntityModifier(ply, ent, mod, info)
+            end
+        end
+
+        return true
+    end
+
     function SWEP:PrimaryAttack()
         self:SetNextPrimaryFire(CurTime() + 0.25)
         storePickup(self:GetOwner(), self, traceTarget(self:GetOwner()))
@@ -299,9 +348,22 @@ if SERVER then
         local removed = DUBZ_INVENTORY.RemoveItem(swep, count, data.quantity or 1)
         if not removed then return end
 
-        removed.quantity = removed.quantity or 1
-        for _ = 1, removed.quantity do
-            spawnWorldItem(ply, removed)
+        local toDrop = removed.quantity or 1
+        local spawned = 0
+
+        removed.quantity = 1
+        for _ = 1, toDrop do
+            if spawnWorldItem(ply, removed) then
+                spawned = spawned + 1
+            else
+                break
+            end
+        end
+
+        local remaining = toDrop - spawned
+        if remaining > 0 then
+            removed.quantity = remaining
+            DUBZ_INVENTORY.AddItem(swep, removed)
         end
 
         sendTip(ply, string.format("Dropped %s", removed.name or "item"))
@@ -439,9 +501,21 @@ if SERVER then
             if dropCount <= 0 then return end
 
             removed.quantity = 1
+            local spawned = 0
             for _ = 1, dropCount do
-                spawnWorldItem(ply, removed)
+                if spawnWorldItem(ply, removed) then
+                    spawned = spawned + 1
+                else
+                    break
+                end
             end
+
+            local remaining = dropCount - spawned
+            if remaining > 0 then
+                removed.quantity = remaining
+                DUBZ_INVENTORY.AddItem(swep, removed)
+            end
+
             sendTip(ply, string.format("Dropped %s", removed.name or "item"))
         elseif action == "destroy" then
             DUBZ_INVENTORY.RemoveItem(swep, index, math.max(amount, 1))
