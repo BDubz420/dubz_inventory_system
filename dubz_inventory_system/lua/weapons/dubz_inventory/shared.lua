@@ -4,7 +4,7 @@ DUBZ_INVENTORY = DUBZ_INVENTORY or {}
 
 SWEP.PrintName = "Dubz Inventory"
 SWEP.Author = "BDubz"
-SWEP.Instructions = "Primary: Pick up    Secondary: Drop last    Reload: Open inventory"
+SWEP.Instructions = "Secondary: Drop backpack    Use dropped bag: Open inventory"
 SWEP.Category = (DUBZ_INVENTORY and DUBZ_INVENTORY.Config.Category) or "Dubz Utilities"
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
@@ -136,7 +136,7 @@ if SERVER then
         return true
     end
 
-    local function sendTip(ply, msg)
+    function DUBZ_INVENTORY.SendTip(ply, msg)
         if not IsValid(ply) then return end
         net.Start("DubzInventory_Tip")
         net.WriteString(msg)
@@ -321,17 +321,17 @@ if SERVER then
 
     local function storePickup(ply, swep, ent)
         if not IsValid(ent) then
-            sendTip(ply, "Aim at a weapon or whitelisted item to pick it up")
+            DUBZ_INVENTORY.SendTip(ply, "Aim at a weapon or whitelisted item to pick it up")
             return
         end
 
         if ent:IsPlayer() or ent:IsNPC() then
-            sendTip(ply, "You can't store that")
+            DUBZ_INVENTORY.SendTip(ply, "You can't store that")
             return
         end
 
         if isPocketBlacklisted(ent:GetClass()) then
-            sendTip(ply, "This item is pocket blacklisted")
+            DUBZ_INVENTORY.SendTip(ply, "This item is pocket blacklisted")
             return
         end
 
@@ -339,29 +339,29 @@ if SERVER then
         if ent:GetClass() == "spawned_weapon" then
             item = spawnedWeaponData(ent)
             if not item.weaponClass then
-                sendTip(ply, "This weapon has no class data")
+                DUBZ_INVENTORY.SendTip(ply, "This weapon has no class data")
                 return
             end
         elseif ent:IsWeapon() then
             if ent:GetOwner() == ply then
-                sendTip(ply, "Drop the weapon first")
+                DUBZ_INVENTORY.SendTip(ply, "Drop the weapon first")
                 return
             end
             item = weaponData(ent)
         elseif next(config.PocketWhitelist) == nil or config.PocketWhitelist[ent:GetClass()] then
             item = entityData(ent)
         else
-            sendTip(ply, "Item is not allowed in this inventory")
+            DUBZ_INVENTORY.SendTip(ply, "Item is not allowed in this inventory")
             return
         end
 
         if not DUBZ_INVENTORY.AddItem(swep, item) then
-            sendTip(ply, "Inventory is full")
+            DUBZ_INVENTORY.SendTip(ply, "Inventory is full")
             return
         end
 
         ent:Remove()
-        sendTip(ply, string.format("Stored %s", item.name))
+        DUBZ_INVENTORY.SendTip(ply, string.format("Stored %s", item.name))
     end
 
     local function validModelPath(path)
@@ -501,53 +501,58 @@ if SERVER then
         end
     end
 
-    function SWEP:PrimaryAttack()
-        self:SetNextPrimaryFire(CurTime() + 0.25)
-        storePickup(self:GetOwner(), self, traceTarget(self:GetOwner()))
-    end
+    local function dropBackpack(ply, swep)
+        if not (IsValid(ply) and IsValid(swep)) then return end
 
-    local function dropLast(ply, swep)
-        local items = cleanItems(swep)
-        local count = #items
-        if count <= 0 then
-            sendTip(ply, "No items to drop")
+        local eyePos = ply:EyePos()
+        local eyeAng = ply:EyeAngles()
+        local tr = util.TraceLine({
+            start = eyePos,
+            endpos = eyePos + eyeAng:Forward() * 85,
+            filter = ply
+        })
+
+        local pos = tr.HitPos + tr.HitNormal * 8
+        if not tr.Hit then
+            pos = eyePos + eyeAng:Forward() * 30
+        end
+
+        local bag = ents.Create("dubz_inventory_bag")
+        if not IsValid(bag) then
+            DUBZ_INVENTORY.SendTip(ply, "Couldn't drop the backpack")
             return
         end
 
-        local data = items[count]
-        local removed = DUBZ_INVENTORY.RemoveItem(swep, count, data.quantity or 1)
-        if not removed then return end
+        bag:SetPos(pos)
+        bag:SetAngles(Angle(0, eyeAng.yaw, 0))
+        bag.StoredItems = table.Copy(cleanItems(swep))
+        bag:Spawn()
+        bag:Activate()
 
-        local toDrop = removed.quantity or 1
-        local spawned = 0
-
-        removed.quantity = 1
-        for _ = 1, toDrop do
-            if spawnWorldItem(ply, removed) then
-                spawned = spawned + 1
-            else
-                break
-            end
+        local phys = bag:GetPhysicsObject()
+        if IsValid(phys) then
+            phys:Wake()
         end
 
-        local remaining = toDrop - spawned
-        if remaining > 0 then
-            removed.quantity = remaining
-            DUBZ_INVENTORY.AddItem(swep, removed)
-        end
+        swep.StoredItems = {}
+        ply:StripWeapon("dubz_inventory")
 
-        sendTip(ply, string.format("Dropped %s", removed.name or "item"))
+        DUBZ_INVENTORY.SendTip(ply, "Dropped your backpack")
+    end
+
+    function SWEP:PrimaryAttack()
+        self:SetNextPrimaryFire(CurTime() + 0.25)
+        DUBZ_INVENTORY.SendTip(self:GetOwner(), "Drop the backpack with right click; press E on it to open.")
     end
 
     function SWEP:SecondaryAttack()
         self:SetNextSecondaryFire(CurTime() + 0.25)
-        dropLast(self:GetOwner(), self)
+        dropBackpack(self:GetOwner(), self)
     end
 
     function SWEP:Reload()
         self:SetNextPrimaryFire(CurTime() + 0.25)
         self:SetNextSecondaryFire(CurTime() + 0.25)
-        DUBZ_INVENTORY.OpenFor(self:GetOwner(), self)
     end
 
     function DUBZ_INVENTORY.OpenFor(ply, swep)
@@ -596,11 +601,11 @@ if SERVER then
                     if removed.ammoAdd and given:GetPrimaryAmmoType() >= 0 then
                         ply:GiveAmmo(removed.ammoAdd, given:GetPrimaryAmmoType())
                     end
-                    sendTip(ply, "Equipped " .. removed.name)
+                    DUBZ_INVENTORY.SendTip(ply, "Equipped " .. removed.name)
                 end
             else
                 if spawnWorldItem(ply, removed) then
-                    sendTip(ply, "Spawned " .. removed.name)
+                    DUBZ_INVENTORY.SendTip(ply, "Spawned " .. removed.name)
                 end
             end
         elseif action == "drop" then
@@ -626,10 +631,10 @@ if SERVER then
                 DUBZ_INVENTORY.AddItem(swep, removed)
             end
 
-            sendTip(ply, string.format("Dropped %s", removed.name or "item"))
+            DUBZ_INVENTORY.SendTip(ply, string.format("Dropped %s", removed.name or "item"))
         elseif action == "destroy" then
             DUBZ_INVENTORY.RemoveItem(swep, index, math.max(amount, 1))
-            sendTip(ply, "Destroyed item")
+            DUBZ_INVENTORY.SendTip(ply, "Destroyed item")
         elseif action == "split" then
             local dataRef = items[index]
             if dataRef and (dataRef.quantity or 1) > 1 then
@@ -642,7 +647,7 @@ if SERVER then
                     quantity = half,
                     itemType = dataRef.itemType
                 })
-                sendTip(ply, "Split stack")
+                DUBZ_INVENTORY.SendTip(ply, "Split stack")
             end
         end
 
@@ -658,7 +663,7 @@ if SERVER then
         if not (verifySwep(ply, src) and verifySwep(ply, dst)) then return end
 
         if not DUBZ_INVENTORY.TransferItem(src, dst, index, amount) then
-            sendTip(ply, "Could not move item")
+            DUBZ_INVENTORY.SendTip(ply, "Could not move item")
         else
             DUBZ_INVENTORY.OpenFor(ply, src)
             if dst ~= src then
@@ -816,29 +821,29 @@ if SERVER then
         local target = tr.Entity
 
         if not (IsValid(target) and target:IsPlayer()) then
-            sendTip(ply, "Look at a player to trade")
+            DUBZ_INVENTORY.SendTip(ply, "Look at a player to trade")
             return
         end
 
         if target == ply then
-            sendTip(ply, "You can't trade with yourself")
+            DUBZ_INVENTORY.SendTip(ply, "You can't trade with yourself")
             return
         end
 
         local id = tradeKey(ply, target)
         if ActiveTrades[id] then
-            sendTip(ply, "You are already trading with this player")
+            DUBZ_INVENTORY.SendTip(ply, "You are already trading with this player")
             return
         end
 
         if PendingInvites[target] and PendingInvites[target] == ply then
-            sendTip(ply, "Trade request already pending")
+            DUBZ_INVENTORY.SendTip(ply, "Trade request already pending")
             return
         end
 
         PendingInvites[target] = ply
         sendTradeInvite(target, ply)
-        sendTip(ply, "Trade request sent")
+        DUBZ_INVENTORY.SendTip(ply, "Trade request sent")
     end
 
     concommand.Add("trade", function(ply)
@@ -862,7 +867,7 @@ if SERVER then
         PendingInvites[ply] = nil
 
         if not accepted then
-            sendTip(requester, "Trade declined")
+            DUBZ_INVENTORY.SendTip(requester, "Trade declined")
             return
         end
 
@@ -870,8 +875,8 @@ if SERVER then
         if ActiveTrades[id] then return end
 
         if not (playerInventory(ply) and playerInventory(requester)) then
-            sendTip(ply, "Both players need the inventory equipped")
-            sendTip(requester, "Both players need the inventory equipped")
+            DUBZ_INVENTORY.SendTip(ply, "Both players need the inventory equipped")
+            DUBZ_INVENTORY.SendTip(requester, "Both players need the inventory equipped")
             return
         end
 
