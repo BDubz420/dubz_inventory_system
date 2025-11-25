@@ -183,6 +183,12 @@ if SERVER then
 
     local function captureEntityState(ent)
         local dupe = duplicator and duplicator.CopyEntTable and duplicator.CopyEntTable(ent)
+        if dupe then
+            dupe.Pos = nil
+            dupe.Angle = nil
+            dupe.EntityPos = nil
+            dupe.EntityAngle = nil
+        end
         local mods
         if duplicator and duplicator.CopyEntTable and ent.EntityMods then
             mods = duplicator.CopyEntTable(ent.EntityMods)
@@ -316,8 +322,20 @@ if SERVER then
     local function spawnWorldItem(ply, data)
         if not (IsValid(ply) and data and data.class) then return false end
 
-        local pos = ply:EyePos() + ply:EyeAngles():Forward() * 30
-        local ang = Angle(0, ply:EyeAngles().yaw, 0)
+        local eyePos = ply:EyePos()
+        local eyeAng = ply:EyeAngles()
+        local tr = util.TraceLine({
+            start = eyePos,
+            endpos = eyePos + eyeAng:Forward() * 85,
+            filter = ply
+        })
+
+        local pos = tr.HitPos + tr.HitNormal * 8
+        if not tr.Hit then
+            pos = eyePos + eyeAng:Forward() * 30
+        end
+
+        local ang = Angle(0, eyeAng.yaw, 0)
         local ent = ents.Create(data.class)
 
         if not IsValid(ent) then return false end
