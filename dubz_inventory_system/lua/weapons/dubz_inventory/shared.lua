@@ -4,7 +4,7 @@ DUBZ_INVENTORY = DUBZ_INVENTORY or {}
 
 SWEP.PrintName = "Dubz Inventory"
 SWEP.Author = "BDubz"
-SWEP.Instructions = "Primary/Secondary: Open inventory menu"
+SWEP.Instructions = "Primary: Pick up    Secondary: Open inventory"
 SWEP.Category = (DUBZ_INVENTORY and DUBZ_INVENTORY.Config.Category) or "Dubz Utilities"
 SWEP.Spawnable = true
 SWEP.AdminOnly = false
@@ -27,16 +27,18 @@ SWEP.Secondary.Ammo = "none"
 
 local config = DUBZ_INVENTORY and DUBZ_INVENTORY.Config or {
     Capacity = 10,
-    ColorBackground = Color(14, 16, 24),
+    ColorBackground = Color(0, 0, 0, 190),
     ColorPanel = Color(24, 28, 38),
     ColorAccent = Color(25, 178, 208),
-    ColorText = Color(230, 234, 242)
+    ColorText = Color(230, 234, 242),
+    PocketWhitelist = {}
 }
 
 if SERVER then
     util.AddNetworkString("DubzInventory_Open")
-    util.AddNetworkString("DubzInventory_Deposit")
-    util.AddNetworkString("DubzInventory_Withdraw")
+    util.AddNetworkString("DubzInventory_Action")
+    util.AddNetworkString("DubzInventory_Move")
+    util.AddNetworkString("DubzInventory_Tip")
 
     function SWEP:Initialize()
         self:SetHoldType("slam")
@@ -49,9 +51,138 @@ if SERVER then
         return swep.StoredItems
     end
 
+    function DUBZ_INVENTORY.CanStack(a, b)
+        return a and b and a.class == b.class and a.model == b.model and a.itemType == b.itemType
+    end
+
+    function DUBZ_INVENTORY.AddItem(swep, itemData)
+        if not IsValid(swep) or not itemData or not itemData.class then return false end
+        local items = cleanItems(swep)
+        for _, data in ipairs(items) do
+            if DUBZ_INVENTORY.CanStack(data, itemData) then
+                data.quantity = (data.quantity or 1) + (itemData.quantity or 1)
+                return true
+            end
+        end
+
+        if #items >= config.Capacity then return false end
+
+        itemData.quantity = itemData.quantity or 1
+        table.insert(items, itemData)
+        return true
+    end
+
+    function DUBZ_INVENTORY.RemoveItem(swep, index, amount)
+        local items = cleanItems(swep)
+        local data = items[index]
+        if not data then return nil end
+
+        local take = math.min(amount or 1, data.quantity or 1)
+        data.quantity = (data.quantity or 1) - take
+
+        if data.quantity <= 0 then
+            table.remove(items, index)
+        end
+
+        data.quantity = take
+        return data
+    end
+
+    function DUBZ_INVENTORY.TransferItem(srcSwep, dstSwep, index, amount)
+        if not (IsValid(srcSwep) and IsValid(dstSwep)) then return false end
+        local removed = DUBZ_INVENTORY.RemoveItem(srcSwep, index, amount)
+        if not removed then return false end
+
+        removed.quantity = amount or removed.quantity or 1
+        local added = DUBZ_INVENTORY.AddItem(dstSwep, removed)
+        if not added then
+            DUBZ_INVENTORY.AddItem(srcSwep, removed)
+            return false
+        end
+
+        return true
+    end
+
+    local function sendTip(ply, msg)
+        if not IsValid(ply) then return end
+        net.Start("DubzInventory_Tip")
+        net.WriteString(msg)
+        net.Send(ply)
+    end
+
+    local function verifySwep(ply, swep)
+        return IsValid(ply) and IsValid(swep) and swep:GetOwner() == ply and swep:GetClass() == "dubz_inventory"
+    end
+
+    local function weaponData(ent)
+        local class = ent:GetClass()
+        return {
+            class = class,
+            name = ent.PrintName or class,
+            model = ent.WorldModel or ent:GetModel(),
+            quantity = 1,
+            itemType = "weapon"
+        }
+    end
+
+    local function entityData(ent)
+        local class = ent:GetClass()
+        return {
+            class = class,
+            name = ent.PrintName or class,
+            model = ent:GetModel(),
+            quantity = 1,
+            itemType = "entity"
+        }
+    end
+
+    local function traceTarget(ply)
+        local tr = util.TraceLine({
+            start = ply:EyePos(),
+            endpos = ply:EyePos() + ply:EyeAngles():Forward() * 100,
+            filter = ply
+        })
+        return tr.Entity
+    end
+
+    local function storePickup(ply, swep, ent)
+        if not IsValid(ent) then
+            sendTip(ply, "Aim at a weapon or whitelisted item to pick it up")
+            return
+        end
+
+        if ent:IsPlayer() or ent:IsNPC() then
+            sendTip(ply, "You can't store that")
+            return
+        end
+
+        local item
+        if ent:IsWeapon() then
+            if ent:GetOwner() == ply then
+                sendTip(ply, "Drop the weapon first")
+                return
+            end
+            item = weaponData(ent)
+        elseif config.PocketWhitelist[ent:GetClass()] then
+            item = entityData(ent)
+        else
+            sendTip(ply, "Item is not allowed in this inventory")
+            return
+        end
+
+        if not DUBZ_INVENTORY.AddItem(swep, item) then
+            sendTip(ply, "Inventory is full")
+            return
+        end
+
+        ent:Remove()
+        sendTip(ply, string.format("Stored %s", item.name))
+        DUBZ_INVENTORY.OpenFor(ply, swep)
+    end
+
     function SWEP:PrimaryAttack()
         self:SetNextPrimaryFire(CurTime() + 0.25)
-        DUBZ_INVENTORY.OpenFor(self:GetOwner(), self)
+        storePickup(self:GetOwner(), self, traceTarget(self:GetOwner()))
     end
 
     function SWEP:SecondaryAttack()
@@ -60,8 +191,7 @@ if SERVER then
     end
 
     function DUBZ_INVENTORY.OpenFor(ply, swep)
-        if not (IsValid(ply) and IsValid(swep)) then return end
-        if swep:GetOwner() ~= ply then return end
+        if not verifySwep(ply, swep) then return end
 
         local items = cleanItems(swep)
 
@@ -71,71 +201,113 @@ if SERVER then
         for _, data in ipairs(items) do
             net.WriteString(data.class or "")
             net.WriteString(data.name or data.class or "Unknown Item")
+            net.WriteString(data.model or "")
+            net.WriteUInt(math.Clamp(data.quantity or 1, 1, 65535), 16)
+            net.WriteString(data.itemType or "entity")
         end
         net.Send(ply)
     end
 
-    local function verifySwep(ply, swep)
-        return IsValid(ply) and IsValid(swep) and swep:GetOwner() == ply and swep:GetClass() == "dubz_inventory"
+    local function spawnWorldItem(ply, data)
+        local pos = ply:EyePos() + ply:EyeAngles():Forward() * 30
+        local ent = ents.Create(data.class)
+        if not IsValid(ent) then return false end
+
+        ent:SetPos(pos)
+        ent:SetAngles(Angle(0, ply:EyeAngles().yaw, 0))
+        ent:Spawn()
+        ent:Activate()
+        return true
     end
 
-    net.Receive("DubzInventory_Deposit", function(_, ply)
-        local swep = net.ReadEntity()
-        local class = net.ReadString()
-        if not verifySwep(ply, swep) then return end
-        if class == swep:GetClass() or class == "" then return end
-
-        local items = cleanItems(swep)
-        if #items >= config.Capacity then
-            ply:ChatPrint("Inventory is full")
-            return
-        end
-
-        if not ply:HasWeapon(class) then return end
-
-        local wep = ply:GetWeapon(class)
-        if not IsValid(wep) then return end
-
-        table.insert(items, {
-            class = class,
-            name = wep.PrintName or class
-        })
-
-        if IsValid(ply:GetActiveWeapon()) and ply:GetActiveWeapon():GetClass() == class then
-            ply:SelectWeapon("hands")
-        end
-
-        ply:StripWeapon(class)
-        DUBZ_INVENTORY.OpenFor(ply, swep)
-    end)
-
-    net.Receive("DubzInventory_Withdraw", function(_, ply)
+    net.Receive("DubzInventory_Action", function(_, ply)
         local swep = net.ReadEntity()
         local index = net.ReadUInt(8)
+        local action = net.ReadString()
+        local amount = net.ReadUInt(16)
+
         if not verifySwep(ply, swep) then return end
 
         local items = cleanItems(swep)
         local data = items[index]
         if not data then return end
 
-        local given = ply:Give(data.class)
-        if IsValid(given) then
-            given.PrintName = data.name
+        if action == "use" then
+            local removed = DUBZ_INVENTORY.RemoveItem(swep, index, 1)
+            if not removed then return end
+
+            if removed.itemType == "weapon" then
+                local given = ply:Give(removed.class)
+                if IsValid(given) then
+                    given.PrintName = removed.name
+                    sendTip(ply, "Equipped " .. removed.name)
+                end
+            else
+                if spawnWorldItem(ply, removed) then
+                    sendTip(ply, "Spawned " .. removed.name)
+                end
+            end
+        elseif action == "drop" then
+            local toDrop = math.max(amount, 1)
+            local removed = DUBZ_INVENTORY.RemoveItem(swep, index, toDrop)
+            if not removed then return end
+
+            removed.quantity = 1
+            for _ = 1, toDrop do
+                spawnWorldItem(ply, removed)
+            end
+            sendTip(ply, "Dropped " .. removed.name)
+        elseif action == "destroy" then
+            DUBZ_INVENTORY.RemoveItem(swep, index, math.max(amount, 1))
+            sendTip(ply, "Destroyed item")
+        elseif action == "split" then
+            local dataRef = items[index]
+            if dataRef and (dataRef.quantity or 1) > 1 then
+                local half = math.floor(dataRef.quantity / 2)
+                dataRef.quantity = dataRef.quantity - half
+                DUBZ_INVENTORY.AddItem(swep, {
+                    class = dataRef.class,
+                    name = dataRef.name,
+                    model = dataRef.model,
+                    quantity = half,
+                    itemType = dataRef.itemType
+                })
+                sendTip(ply, "Split stack")
+            end
         end
 
-        table.remove(items, index)
         DUBZ_INVENTORY.OpenFor(ply, swep)
     end)
-else
-    local accent = config.ColorAccent or Color(25, 178, 208)
-    local bg = config.ColorBackground or Color(14, 16, 24)
+
+    net.Receive("DubzInventory_Move", function(_, ply)
+        local src = net.ReadEntity()
+        local dst = net.ReadEntity()
+        local index = net.ReadUInt(8)
+        local amount = net.ReadUInt(16)
+
+        if not (verifySwep(ply, src) and verifySwep(ply, dst)) then return end
+
+        if not DUBZ_INVENTORY.TransferItem(src, dst, index, amount) then
+            sendTip(ply, "Could not move item")
+        else
+            DUBZ_INVENTORY.OpenFor(ply, src)
+            if dst ~= src then
+                DUBZ_INVENTORY.OpenFor(ply, dst)
+            end
+        end
+    end)
+end
+
+if CLIENT then
+    local bg = config.ColorBackground or Color(0, 0, 0, 190)
     local panelCol = config.ColorPanel or Color(24, 28, 38)
-    local textColor = config.ColorText or color_white
+    local accent = config.ColorAccent or Color(25, 178, 208)
+    local textColor = config.ColorText or Color(230, 234, 242)
 
     surface.CreateFont("DubzInv_Title", {
         font = "Montserrat",
-        size = 26,
-        weight = 600
+        size = 22,
+        weight = 700
     })
 
     surface.CreateFont("DubzInv_Label", {
@@ -150,91 +322,108 @@ else
         weight = 600
     })
 
+    surface.CreateFont("DubzInv_Small", {
+        font = "Montserrat",
+        size = 14,
+        weight = 500
+    })
+
     local function drawPanelOutline(w, h)
         draw.RoundedBox(12, 0, 0, w, h, panelCol)
         surface.SetDrawColor(accent)
         surface.DrawRect(0, 0, w, 3)
     end
 
-    local function buildList(parent, header, height)
+    local function buildSection(parent, header)
         local wrap = vgui.Create("DPanel", parent)
-        wrap:Dock(TOP)
+        wrap:Dock(FILL)
         wrap:DockMargin(0, 8, 0, 0)
-        wrap:SetTall(height)
         wrap.Paint = function(self, w, h)
             drawPanelOutline(w, h)
             draw.SimpleText(header, "DubzInv_Label", 12, 10, textColor, TEXT_ALIGN_LEFT, TEXT_ALIGN_TOP)
+            draw.SimpleText("Left click to use, right click for options", "DubzInv_Small", 14, 32, ColorAlpha(textColor, 160), TEXT_ALIGN_LEFT, TEXT_ALIGN_TOP)
         end
-        local scroll = vgui.Create("DScrollPanel", wrap)
-        scroll:Dock(FILL)
-        scroll:DockMargin(8, 32, 8, 8)
-        return wrap, scroll
+
+        local layout = vgui.Create("DIconLayout", wrap)
+        layout:Dock(FILL)
+        layout:DockMargin(10, 52, 10, 10)
+        layout:SetSpaceX(8)
+        layout:SetSpaceY(8)
+
+        return layout
     end
 
-    local function weaponRows(scroll, weapons, swep)
-        for _, wep in ipairs(weapons) do
-            local class = wep:GetClass()
-            local display = wep.PrintName or class
-            local row = scroll:Add("DPanel")
-            row:Dock(TOP)
-            row:DockMargin(0, 6, 0, 0)
-            row:SetTall(46)
-            row.Paint = function(self, w, h)
-                draw.RoundedBox(8, 0, 0, w, h, bg)
-                draw.SimpleText(display, "DubzInv_Label", 12, h / 2, textColor, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
-                draw.SimpleText(class, "DubzInv_Button", w / 2, h / 2, ColorAlpha(textColor, 140), TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
-            end
-
-            local addBtn = row:Add("DButton")
-            addBtn:Dock(RIGHT)
-            addBtn:DockMargin(6, 6, 6, 6)
-            addBtn:SetWide(110)
-            addBtn:SetText("Store")
-            addBtn:SetFont("DubzInv_Button")
-            addBtn:SetTextColor(textColor)
-            addBtn.Paint = function(self, w, h)
-                draw.RoundedBox(8, 0, 0, w, h, accent)
-            end
-            addBtn.DoClick = function()
-                net.Start("DubzInventory_Deposit")
-                net.WriteEntity(swep)
-                net.WriteString(class)
-                net.SendToServer()
-            end
-        end
+    local function sendAction(swep, index, action, amount)
+        net.Start("DubzInventory_Action")
+        net.WriteEntity(swep)
+        net.WriteUInt(index, 8)
+        net.WriteString(action)
+        net.WriteUInt(amount or 1, 16)
+        net.SendToServer()
     end
 
-    local function storageRows(scroll, items, swep)
-        for idx, data in ipairs(items) do
-            local itemIndex = idx
-            local row = scroll:Add("DPanel")
-            row:Dock(TOP)
-            row:DockMargin(0, 6, 0, 0)
-            row:SetTall(46)
-            row.Paint = function(self, w, h)
-                draw.RoundedBox(8, 0, 0, w, h, bg)
-                draw.SimpleText(data.name, "DubzInv_Label", 12, h / 2, textColor, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
-                draw.SimpleText(data.class, "DubzInv_Button", w / 2, h / 2, ColorAlpha(textColor, 140), TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER)
+    local function addItemIcon(layout, data, index, swep)
+        local panel = layout:Add("DPanel")
+        panel:SetSize(100, 120)
+        panel.Paint = function(self, w, h)
+            draw.RoundedBox(10, 0, 0, w, h, bg)
+            draw.SimpleText(data.name, "DubzInv_Button", w / 2, h - 22, textColor, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+            draw.SimpleText(string.format("x%d", data.quantity or 1), "DubzInv_Small", w / 2, h - 8, ColorAlpha(textColor, 180), TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+        end
+
+        local icon = vgui.Create("SpawnIcon", panel)
+        icon:SetModel(data.model ~= "" and data.model or "models/props_junk/PopCan01a.mdl")
+        icon:SetPos(7, 6)
+        icon:SetSize(86, 86)
+        icon:SetTooltip(nil)
+        icon.PaintOver = function(self, w, h)
+            surface.SetDrawColor(accent)
+            surface.DrawOutlinedRect(0, 0, w, h, 1)
+        end
+
+        icon.DoClick = function()
+            sendAction(swep, index, "use", 1)
+        end
+
+        icon.DoRightClick = function()
+            local menu = DermaMenu()
+            if data.itemType == "weapon" then
+                menu:AddOption("Equip", function()
+                    sendAction(swep, index, "use", 1)
+                end):SetIcon("icon16/gun.png")
+            else
+                menu:AddOption("Spawn", function()
+                    sendAction(swep, index, "use", 1)
+                end):SetIcon("icon16/brick.png")
             end
 
-            local takeBtn = row:Add("DButton")
-            takeBtn:Dock(RIGHT)
-            takeBtn:DockMargin(6, 6, 6, 6)
-            takeBtn:SetWide(110)
-            takeBtn:SetText("Withdraw")
-            takeBtn:SetFont("DubzInv_Button")
-            takeBtn:SetTextColor(textColor)
-            takeBtn.Paint = function(self, w, h)
-                draw.RoundedBox(8, 0, 0, w, h, accent)
+            menu:AddOption("Drop", function()
+                Derma_StringRequest("Drop amount", "How many do you want to drop?", "1", function(text)
+                    sendAction(swep, index, "drop", tonumber(text) or 1)
+                end)
+            end):SetIcon("icon16/arrow_down.png")
+
+            menu:AddOption("Destroy", function()
+                sendAction(swep, index, "destroy", data.quantity or 1)
+            end):SetIcon("icon16/bin_closed.png")
+
+            if (data.quantity or 1) > 1 then
+                menu:AddOption("Split stack", function()
+                    sendAction(swep, index, "split", 1)
+                end):SetIcon("icon16/table_split.png")
             end
-            takeBtn.DoClick = function()
-                net.Start("DubzInventory_Withdraw")
-                net.WriteEntity(swep)
-                net.WriteUInt(itemIndex, 8)
-                net.SendToServer()
-            end
+
+            menu:Open()
         end
+
+        return panel
     end
+
+    net.Receive("DubzInventory_Tip", function()
+        local msg = net.ReadString()
+        notification.AddLegacy(msg, NOTIFY_HINT, 3)
+        surface.PlaySound("buttons/button15.wav")
+    end)
 
     net.Receive("DubzInventory_Open", function()
         local swep = net.ReadEntity()
@@ -243,14 +432,17 @@ else
         for i = 1, count do
             items[i] = {
                 class = net.ReadString(),
-                name = net.ReadString()
+                name = net.ReadString(),
+                model = net.ReadString(),
+                quantity = net.ReadUInt(16),
+                itemType = net.ReadString()
             }
         end
 
         if not IsValid(swep) then return end
 
         local frame = vgui.Create("DFrame")
-        frame:SetSize(640, 520)
+        frame:SetSize(700, 520)
         frame:Center()
         frame:MakePopup()
         frame:SetTitle("")
@@ -258,7 +450,7 @@ else
         frame.Paint = function(self, w, h)
             draw.RoundedBox(12, 0, 0, w, h, bg)
             draw.SimpleText("Dubz Inventory", "DubzInv_Title", 14, 10, textColor)
-            draw.SimpleText(string.format("%d / %d slots", #items, config.Capacity), "DubzInv_Button", 16, 42, ColorAlpha(textColor, 180))
+            draw.SimpleText(string.format("%d / %d stacks", #items, config.Capacity), "DubzInv_Button", 16, 42, ColorAlpha(textColor, 180))
             surface.SetDrawColor(accent)
             surface.DrawRect(0, 0, w, 3)
         end
@@ -281,28 +473,17 @@ else
         body:DockMargin(12, 70, 12, 12)
         body.Paint = nil
 
-        local storageWrap, storageScroll = buildList(body, "Stored weapons", 220)
-        storageRows(storageScroll, items, swep)
+        local info = vgui.Create("DLabel", body)
+        info:Dock(TOP)
+        info:SetTall(26)
+        info:SetFont("DubzInv_Button")
+        info:SetTextColor(ColorAlpha(textColor, 180))
+        info:SetText("Left click items on the ground to store them. Secondary opens this menu.")
 
-        local weaponsWrap, weaponsScroll = buildList(body, "Your weapons", 180)
-        local weapons = LocalPlayer():GetWeapons()
-        local filtered = {}
-        for _, wep in ipairs(weapons) do
-            if IsValid(wep) and wep:GetClass() ~= swep:GetClass() then
-                table.insert(filtered, wep)
-            end
-        end
+        local grid = buildSection(body, "Inventory")
 
-        if #items >= config.Capacity then
-            local fullLabel = weaponsScroll:Add("DLabel")
-            fullLabel:Dock(TOP)
-            fullLabel:SetTall(28)
-            fullLabel:SetText("Inventory is full")
-            fullLabel:SetFont("DubzInv_Button")
-            fullLabel:SetTextColor(ColorAlpha(textColor, 180))
-            fullLabel:DockMargin(0, 6, 0, 0)
-        else
-            weaponRows(weaponsScroll, filtered, swep)
+        for idx, data in ipairs(items) do
+            addItemIcon(grid, data, idx, swep)
         end
     end)
 end
@@ -321,4 +502,3 @@ end
 function SWEP:OnRemove()
     self.StoredItems = nil
 end
-
