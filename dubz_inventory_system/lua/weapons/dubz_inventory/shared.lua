@@ -432,15 +432,17 @@ if SERVER then
                 end
             end
         elseif action == "drop" then
-            local toDrop = math.max(amount, 1)
-            local removed = DUBZ_INVENTORY.RemoveItem(swep, index, toDrop)
+            local removed = DUBZ_INVENTORY.RemoveItem(swep, index, math.max(amount, 1))
             if not removed then return end
 
+            local dropCount = math.max(removed.quantity or 0, 0)
+            if dropCount <= 0 then return end
+
             removed.quantity = 1
-            for _ = 1, toDrop do
+            for _ = 1, dropCount do
                 spawnWorldItem(ply, removed)
             end
-            sendTip(ply, "Dropped " .. removed.name)
+            sendTip(ply, string.format("Dropped %s", removed.name or "item"))
         elseif action == "destroy" then
             DUBZ_INVENTORY.RemoveItem(swep, index, math.max(amount, 1))
             sendTip(ply, "Destroyed item")
@@ -598,10 +600,6 @@ if CLIENT then
                 menu:AddOption("Equip", function()
                     sendAction(swep, index, "use", 1)
                 end):SetIcon("icon16/gun.png")
-            else
-                menu:AddOption("Spawn", function()
-                    sendAction(swep, index, "use", 1)
-                end):SetIcon("icon16/brick.png")
             end
 
             menu:AddOption("Drop", function()
