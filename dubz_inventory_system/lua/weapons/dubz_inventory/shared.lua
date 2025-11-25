@@ -39,6 +39,15 @@ if SERVER then
     util.AddNetworkString("DubzInventory_Action")
     util.AddNetworkString("DubzInventory_Move")
     util.AddNetworkString("DubzInventory_Tip")
+    util.AddNetworkString("DubzInventory_TradeInvite")
+    util.AddNetworkString("DubzInventory_TradeReply")
+    util.AddNetworkString("DubzInventory_TradeStart")
+    util.AddNetworkString("DubzInventory_TradeSync")
+    util.AddNetworkString("DubzInventory_TradeEnd")
+    util.AddNetworkString("DubzInventory_TradeAction")
+
+    local ActiveTrades = {}
+    local PendingInvites = {}
 
     function SWEP:Initialize()
         self:SetHoldType("slam")
@@ -163,6 +172,42 @@ if SERVER then
         end
 
         return false
+    end
+
+    local function tradeKey(a, b)
+        if not (IsValid(a) and IsValid(b)) then return nil end
+        local ids = {a:SteamID64() or a:UserID(), b:SteamID64() or b:UserID()}
+        table.sort(ids)
+        return table.concat(ids, ":")
+    end
+
+    local function addToOffer(list, item)
+        if not item then return false end
+        item.quantity = item.quantity or 1
+        for _, data in ipairs(list) do
+            if DUBZ_INVENTORY.CanStack(data, item) then
+                data.quantity = (data.quantity or 1) + item.quantity
+                return true
+            end
+        end
+
+        table.insert(list, item)
+        return true
+    end
+
+    local function removeFromOffer(list, index, amount)
+        local data = list[index]
+        if not data then return nil end
+
+        local take = math.min(amount or 1, data.quantity or 1)
+        data.quantity = (data.quantity or 1) - take
+
+        if data.quantity <= 0 then
+            table.remove(list, index)
+        end
+
+        data.quantity = take
+        return data
     end
 
     local function captureSubMaterials(ent)
@@ -319,6 +364,25 @@ if SERVER then
         sendTip(ply, string.format("Stored %s", item.name))
     end
 
+    local function validModelPath(path)
+        return path and path ~= "" and util.IsValidModel(path)
+    end
+
+    local function resolveSpawnModel(data)
+        if validModelPath(data.model) then
+            return data.model
+        end
+
+        if data.weaponClass then
+            local stored = weapons.GetStored(data.weaponClass)
+            if stored and validModelPath(stored.WorldModel) then
+                return stored.WorldModel
+            end
+        end
+
+        return "models/weapons/w_pist_deagle.mdl"
+    end
+
     local function spawnWorldItem(ply, data)
         if not (IsValid(ply) and data and data.class) then return false end
 
@@ -353,10 +417,8 @@ if SERVER then
             ent:SetNWString("weaponclass", data.weaponClass)
             ent:SetNWString("WeaponClass", data.weaponClass)
 
-            if data.model then
-                ent:SetModel(data.model)
-            end
-
+            ent:SetModel(resolveSpawnModel(data))
+            
             ent.clip1 = data.clip1
             ent.clip2 = data.clip2
             ent.ammoadd = data.ammoAdd
@@ -423,6 +485,22 @@ if SERVER then
         return IsValid(ent)
     end
 
+    local function writeNetItem(data)
+        net.WriteString(data.class or "")
+        net.WriteString(data.name or data.class or "Unknown Item")
+        net.WriteString(data.model or "")
+        net.WriteUInt(math.Clamp(data.quantity or 1, 1, 65535), 16)
+        net.WriteString(data.itemType or "entity")
+        net.WriteString(data.material or "")
+
+        local subMats = data.subMaterials or {}
+        net.WriteUInt(math.min(table.Count(subMats), 16), 5)
+        for idx, mat in pairs(subMats) do
+            net.WriteUInt(idx, 5)
+            net.WriteString(mat)
+        end
+    end
+
     function SWEP:PrimaryAttack()
         self:SetNextPrimaryFire(CurTime() + 0.25)
         storePickup(self:GetOwner(), self, traceTarget(self:GetOwner()))
@@ -481,19 +559,7 @@ if SERVER then
         net.WriteEntity(swep)
         net.WriteUInt(#items, 8)
         for _, data in ipairs(items) do
-            net.WriteString(data.class or "")
-            net.WriteString(data.name or data.class or "Unknown Item")
-            net.WriteString(data.model or "")
-            net.WriteUInt(math.Clamp(data.quantity or 1, 1, 65535), 16)
-            net.WriteString(data.itemType or "entity")
-            net.WriteString(data.material or "")
-
-            local subMats = data.subMaterials or {}
-            net.WriteUInt(math.min(table.Count(subMats), 16), 5)
-            for idx, mat in pairs(subMats) do
-                net.WriteUInt(idx, 5)
-                net.WriteString(mat)
-            end
+            writeNetItem(data)
         end
         net.Send(ply)
     end
@@ -600,7 +666,286 @@ if SERVER then
             end
         end
     end)
+
+    local function playerInventory(ply)
+        if not IsValid(ply) then return nil end
+        local swep = ply:GetWeapon("dubz_inventory")
+        if verifySwep(ply, swep) then return swep end
+        return nil
+    end
+
+    local function sendTradeInvite(target, requester)
+        net.Start("DubzInventory_TradeInvite")
+        net.WriteEntity(requester)
+        net.Send(target)
+    end
+
+    local function sendTradeStart(trade)
+        for _, ply in ipairs(trade.players) do
+            local partner = ply == trade.players[1] and trade.players[2] or trade.players[1]
+            net.Start("DubzInventory_TradeStart")
+            net.WriteString(trade.id)
+            net.WriteEntity(partner)
+            net.Send(ply)
+        end
+    end
+
+    local function sendTradeSync(trade)
+        if not trade then return end
+
+        for _, ply in ipairs(trade.players) do
+            local partner = ply == trade.players[1] and trade.players[2] or trade.players[1]
+            net.Start("DubzInventory_TradeSync")
+            net.WriteString(trade.id)
+            net.WriteEntity(partner)
+            net.WriteBool(trade.ready[ply] or false)
+            net.WriteBool(trade.ready[partner] or false)
+
+            local myOffer = trade.offers[ply] or {}
+            net.WriteUInt(#myOffer, 8)
+            for _, data in ipairs(myOffer) do
+                writeNetItem(data)
+            end
+
+            local partnerOffer = trade.offers[partner] or {}
+            net.WriteUInt(#partnerOffer, 8)
+            for _, data in ipairs(partnerOffer) do
+                writeNetItem(data)
+            end
+
+            net.Send(ply)
+        end
+    end
+
+    local function returnTradeItems(trade)
+        if not trade then return end
+
+        for _, ply in ipairs(trade.players) do
+            local swep = playerInventory(ply)
+            local offer = trade.offers[ply] or {}
+
+            for _, data in ipairs(offer) do
+                local copy = table.Copy(data)
+                if swep then
+                    if not DUBZ_INVENTORY.AddItem(swep, copy) then
+                        spawnWorldItem(ply, copy)
+                    end
+                else
+                    spawnWorldItem(ply, copy)
+                end
+            end
+        end
+    end
+
+    local function endTrade(trade, reason)
+        if not trade then return end
+        ActiveTrades[trade.id] = nil
+
+        returnTradeItems(trade)
+
+        for _, ply in ipairs(trade.players) do
+            net.Start("DubzInventory_TradeEnd")
+            net.WriteString(trade.id)
+            net.WriteString(reason or "")
+            net.Send(ply)
+        end
+    end
+
+    local function finishTrade(trade)
+        local a, b = trade.players[1], trade.players[2]
+        if not (IsValid(a) and IsValid(b)) then returnTradeItems(trade) end
+
+        local swepA = playerInventory(a)
+        local swepB = playerInventory(b)
+
+        if not (swepA and swepB) then
+            endTrade(trade, "Trade canceled (missing inventory)")
+            return
+        end
+
+        for _, data in ipairs(trade.offers[a] or {}) do
+            local copy = table.Copy(data)
+            if not DUBZ_INVENTORY.AddItem(swepB, copy) then
+                spawnWorldItem(b, copy)
+            end
+        end
+
+        for _, data in ipairs(trade.offers[b] or {}) do
+            local copy = table.Copy(data)
+            if not DUBZ_INVENTORY.AddItem(swepA, copy) then
+                spawnWorldItem(a, copy)
+            end
+        end
+
+        DUBZ_INVENTORY.OpenFor(a, swepA)
+        DUBZ_INVENTORY.OpenFor(b, swepB)
+
+        ActiveTrades[trade.id] = nil
+
+        for _, ply in ipairs(trade.players) do
+            net.Start("DubzInventory_TradeEnd")
+            net.WriteString(trade.id)
+            net.WriteString("Trade complete")
+            net.Send(ply)
+        end
+    end
+
+    local function createTrade(ply, target)
+        local id = tradeKey(ply, target)
+        if not id then return end
+
+        ActiveTrades[id] = {
+            id = id,
+            players = {ply, target},
+            offers = {[ply] = {}, [target] = {}},
+            ready = {[ply] = false, [target] = false}
+        }
+
+        sendTradeStart(ActiveTrades[id])
+        sendTradeSync(ActiveTrades[id])
+
+        local swepA = playerInventory(ply)
+        local swepB = playerInventory(target)
+        if swepA then DUBZ_INVENTORY.OpenFor(ply, swepA) end
+        if swepB then DUBZ_INVENTORY.OpenFor(target, swepB) end
+    end
+
+    local function requestTrade(ply)
+        if not IsValid(ply) then return end
+        local tr = ply:GetEyeTrace()
+        local target = tr.Entity
+
+        if not (IsValid(target) and target:IsPlayer()) then
+            sendTip(ply, "Look at a player to trade")
+            return
+        end
+
+        if target == ply then
+            sendTip(ply, "You can't trade with yourself")
+            return
+        end
+
+        local id = tradeKey(ply, target)
+        if ActiveTrades[id] then
+            sendTip(ply, "You are already trading with this player")
+            return
+        end
+
+        if PendingInvites[target] and PendingInvites[target] == ply then
+            sendTip(ply, "Trade request already pending")
+            return
+        end
+
+        PendingInvites[target] = ply
+        sendTradeInvite(target, ply)
+        sendTip(ply, "Trade request sent")
+    end
+
+    concommand.Add("trade", function(ply)
+        if not IsValid(ply) then return end
+        requestTrade(ply)
+    end)
+
+    hook.Add("PlayerSay", "DubzInventoryTradeChat", function(ply, text)
+        if string.lower(string.Trim(text)) == "trade" then
+            requestTrade(ply)
+            return ""
+        end
+    end)
+
+    net.Receive("DubzInventory_TradeReply", function(_, ply)
+        local requester = net.ReadEntity()
+        local accepted = net.ReadBool()
+
+        if not IsValid(requester) or PendingInvites[ply] ~= requester then return end
+
+        PendingInvites[ply] = nil
+
+        if not accepted then
+            sendTip(requester, "Trade declined")
+            return
+        end
+
+        local id = tradeKey(ply, requester)
+        if ActiveTrades[id] then return end
+
+        if not (playerInventory(ply) and playerInventory(requester)) then
+            sendTip(ply, "Both players need the inventory equipped")
+            sendTip(requester, "Both players need the inventory equipped")
+            return
+        end
+
+        createTrade(ply, requester)
+    end)
+
+    net.Receive("DubzInventory_TradeAction", function(_, ply)
+        local id = net.ReadString()
+        local action = net.ReadString()
+        local trade = ActiveTrades[id]
+
+        if not trade then return end
+        if ply ~= trade.players[1] and ply ~= trade.players[2] then return end
+
+        local partner = ply == trade.players[1] and trade.players[2] or trade.players[1]
+        local myOffer = trade.offers[ply]
+
+        if action == "offer" then
+            local invIndex = net.ReadUInt(8)
+            local amount = net.ReadUInt(16)
+            local swep = playerInventory(ply)
+            if not swep then return end
+
+            local removed = DUBZ_INVENTORY.RemoveItem(swep, invIndex, math.max(amount, 1))
+            if not removed then return end
+
+            removed.quantity = math.max(amount, 1)
+            addToOffer(myOffer, removed)
+            trade.ready[ply] = false
+            trade.ready[partner] = false
+            DUBZ_INVENTORY.OpenFor(ply, swep)
+            sendTradeSync(trade)
+        elseif action == "retrieve" then
+            local offerIndex = net.ReadUInt(8)
+            local amount = net.ReadUInt(16)
+            local swep = playerInventory(ply)
+            if not swep then return end
+
+            local removed = removeFromOffer(myOffer, offerIndex, math.max(amount, 1))
+            if not removed then return end
+
+            trade.ready[ply] = false
+            trade.ready[partner] = false
+
+            if not DUBZ_INVENTORY.AddItem(swep, removed) then
+                spawnWorldItem(ply, removed)
+            end
+
+            DUBZ_INVENTORY.OpenFor(ply, swep)
+            sendTradeSync(trade)
+        elseif action == "ready" then
+            local readyState = net.ReadBool()
+            trade.ready[ply] = readyState
+            sendTradeSync(trade)
+
+            if readyState and trade.ready[partner] then
+                finishTrade(trade)
+            end
+        elseif action == "cancel" then
+            endTrade(trade, "Trade canceled")
+        end
+    end)
+
+    hook.Add("PlayerDisconnected", "DubzInventoryTradeCleanup", function(ply)
+        for id, trade in pairs(ActiveTrades) do
+            if trade.players[1] == ply or trade.players[2] == ply then
+                endTrade(trade, "Trade canceled (player left)")
+            end
+        end
+
+        PendingInvites[ply] = nil
+    end)
 end
+
 
 if CLIENT then
     local bg = config.ColorBackground or Color(0, 0, 0, 190)
@@ -633,36 +978,50 @@ if CLIENT then
     })
 
     local function drawPanelOutline(w, h)
-        draw.RoundedBox(12, 0, 0, w, h, panelCol)
+        draw.RoundedBox(10, 0, 0, w, h, panelCol)
         surface.SetDrawColor(accent)
-        surface.DrawRect(0, 0, w, 3)
+        surface.DrawRect(0, 0, w, 2)
     end
 
-    local function buildSection(parent, header)
-        local wrap = vgui.Create("DPanel", parent)
-        wrap:Dock(FILL)
-        wrap:DockMargin(0, 8, 0, 0)
-        wrap.Paint = function(self, w, h)
-            drawPanelOutline(w, h)
-            draw.SimpleText(header, "DubzInv_Label", 12, 10, textColor, TEXT_ALIGN_LEFT, TEXT_ALIGN_TOP)
-            draw.SimpleText(
-                "Right click items for options",
-                "DubzInv_Small",
-                14,
-                32,
-                ColorAlpha(textColor, 160),
-                TEXT_ALIGN_LEFT,
-                TEXT_ALIGN_TOP
-            )
+    local function readNetItem()
+        local item = {
+            class = net.ReadString(),
+            name = net.ReadString(),
+            model = net.ReadString(),
+            quantity = net.ReadUInt(16),
+            itemType = net.ReadString(),
+            material = net.ReadString()
+        }
+
+        local subMaterials = {}
+        local subCount = net.ReadUInt(5)
+        for _ = 1, subCount do
+            local idx = net.ReadUInt(5)
+            subMaterials[idx] = net.ReadString()
         end
 
-        local layout = vgui.Create("DIconLayout", wrap)
-        layout:Dock(FILL)
-        layout:DockMargin(10, 52, 10, 10)
-        layout:SetSpaceX(8)
-        layout:SetSpaceY(8)
+        if not table.IsEmpty(subMaterials) then
+            item.subMaterials = subMaterials
+        end
 
-        return layout
+        return item
+    end
+
+    local function applyIconMaterials(icon, data)
+        if not (data and (data.material or data.subMaterials)) then return end
+
+        timer.Simple(0, function()
+            if not (IsValid(icon) and IsValid(icon.Entity)) then return end
+            if data.material and data.material ~= "" then
+                icon.Entity:SetMaterial(data.material)
+            end
+
+            if data.subMaterials then
+                for idx, mat in pairs(data.subMaterials) do
+                    icon.Entity:SetSubMaterial(idx, mat)
+                end
+            end
+        end)
     end
 
     local function sendAction(swep, index, action, amount)
@@ -674,72 +1033,380 @@ if CLIENT then
         net.SendToServer()
     end
 
-    local function addItemIcon(layout, data, index, swep)
+    local function createItemTile(layout, data, swep, index, payload)
         local panel = layout:Add("DPanel")
-        panel:SetSize(100, 120)
+        panel:SetSize(92, 110)
+        panel.DragPayload = payload
+        panel:Droppable("DubzInvItem")
         panel.Paint = function(self, w, h)
-            draw.RoundedBox(10, 0, 0, w, h, bg)
-            draw.SimpleText(data.name, "DubzInv_Button", w / 2, h - 22, textColor, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
-            draw.SimpleText(string.format("x%d", data.quantity or 1), "DubzInv_Small", w / 2, h - 8, ColorAlpha(textColor, 180), TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+            draw.RoundedBox(8, 0, 0, w, h, bg)
+            draw.SimpleText(data.name, "DubzInv_Small", w / 2, h - 18, textColor, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+            draw.SimpleText("x" .. (data.quantity or 1), "DubzInv_Small", w / 2, h - 5, ColorAlpha(textColor, 170), TEXT_ALIGN_CENTER,
+                TEXT_ALIGN_CENTER)
         end
 
         local icon = vgui.Create("SpawnIcon", panel)
         icon:SetModel(data.model ~= "" and data.model or "models/props_junk/PopCan01a.mdl")
-        icon:SetPos(7, 6)
-        icon:SetSize(86, 86)
+        icon:SetPos(6, 6)
+        icon:SetSize(80, 80)
         icon:SetTooltip(nil)
-        icon.PaintOver = function(self, w, h)
+        icon.PaintOver = function(_, w, h)
             surface.SetDrawColor(accent)
             surface.DrawOutlinedRect(0, 0, w, h, 1)
         end
 
-        if (data.material and data.material ~= "") or data.subMaterials then
-            timer.Simple(0, function()
-                if not (IsValid(icon) and IsValid(icon.Entity)) then return end
-                if data.material and data.material ~= "" then
-                    icon.Entity:SetMaterial(data.material)
-                end
+        applyIconMaterials(icon, data)
 
-                if data.subMaterials then
-                    for idx, mat in pairs(data.subMaterials) do
-                        icon.Entity:SetSubMaterial(idx, mat)
-                    end
-                end
-            end)
+        panel.OnMousePressed = function(self, mc)
+            if mc == MOUSE_LEFT then
+                self:DragMousePress(mc)
+            end
         end
 
-        icon.DoClick = function()
-            sendAction(swep, index, "use", 1)
+        panel.OnMouseReleased = function(self, mc)
+            if mc == MOUSE_LEFT then
+                self:DragMouseRelease(mc)
+            end
         end
 
-        icon.DoRightClick = function()
-            local menu = DermaMenu()
-            if data.itemType == "weapon" then
-                menu:AddOption("Equip", function()
-                    sendAction(swep, index, "use", 1)
-                end):SetIcon("icon16/gun.png")
+        if swep and index then
+            icon.DoClick = function()
+                sendAction(swep, index, "use", 1)
             end
 
-            menu:AddOption("Drop", function()
-                Derma_StringRequest("Drop amount", "How many do you want to drop?", "1", function(text)
-                    sendAction(swep, index, "drop", tonumber(text) or 1)
-                end)
-            end):SetIcon("icon16/arrow_down.png")
+            icon.DoRightClick = function()
+                local menu = DermaMenu()
+                if data.itemType == "weapon" then
+                    menu:AddOption("Equip", function()
+                        sendAction(swep, index, "use", 1)
+                    end):SetIcon("icon16/gun.png")
+                end
 
-            menu:AddOption("Destroy", function()
-                sendAction(swep, index, "destroy", data.quantity or 1)
-            end):SetIcon("icon16/bin_closed.png")
+                menu:AddOption("Drop", function()
+                    Derma_StringRequest("Drop amount", "How many do you want to drop?", tostring(data.quantity or 1), function(text)
+                        sendAction(swep, index, "drop", tonumber(text) or 1)
+                    end)
+                end):SetIcon("icon16/arrow_down.png")
 
-            if (data.quantity or 1) > 1 then
-                menu:AddOption("Split stack", function()
-                    sendAction(swep, index, "split", 1)
-                end):SetIcon("icon16/table_split.png")
+                menu:AddOption("Destroy", function()
+                    sendAction(swep, index, "destroy", data.quantity or 1)
+                end):SetIcon("icon16/bin_closed.png")
+
+                if (data.quantity or 1) > 1 then
+                    menu:AddOption("Split stack", function()
+                        sendAction(swep, index, "split", 1)
+                    end):SetIcon("icon16/table_split.png")
+                end
+
+                menu:Open()
             end
-
-            menu:Open()
         end
 
         return panel
+    end
+
+    local inventoryFrames = {}
+    local inventoryData = {}
+
+    local tradeState = {
+        id = nil,
+        partner = nil,
+        frame = nil,
+        myReady = false,
+        partnerReady = false,
+        myOffer = {},
+        partnerOffer = {},
+        swep = nil
+    }
+
+    local function sendTradeAction(action, a, b)
+        if not tradeState.id then return end
+        net.Start("DubzInventory_TradeAction")
+        net.WriteString(tradeState.id)
+        net.WriteString(action)
+
+        if action == "offer" or action == "retrieve" then
+            net.WriteUInt(a or 0, 8)
+            net.WriteUInt(b or 1, 16)
+        elseif action == "ready" then
+            net.WriteBool(a)
+        end
+
+        net.SendToServer()
+    end
+
+    local function buildGrid(parent)
+        local grid = vgui.Create("DIconLayout", parent)
+        grid:SetSpaceX(6)
+        grid:SetSpaceY(6)
+        grid:Dock(FILL)
+        grid:DockMargin(10, 36, 10, 10)
+        return grid
+    end
+
+    local function refreshInventoryFrame(swep)
+        local frame = inventoryFrames[swep]
+        if not IsValid(frame) then return end
+        local items = inventoryData[swep] or {}
+        frame.ItemLabel:SetText(string.format("%d / %d slots", #items, config.Capacity))
+        frame.Grid:Clear()
+
+        frame.Grid:Receiver("DubzInvItem", function(_, panels, dropped)
+            if not dropped then return end
+            local payload = panels[1] and panels[1].DragPayload
+            if not payload or not tradeState.id then return end
+            if payload.type == "offer" and payload.owner == LocalPlayer() then
+                local maxAmt = payload.data.quantity or 1
+                Derma_StringRequest("Retrieve", "Take how many back?", tostring(maxAmt), function(text)
+                    local amt = math.Clamp(tonumber(text) or 1, 1, maxAmt)
+                    sendTradeAction("retrieve", payload.index, amt)
+                end)
+            end
+        end)
+
+        for idx, data in ipairs(items) do
+            local payload = {type = "inventory", swep = swep, index = idx, data = data}
+            createItemTile(frame.Grid, data, swep, idx, payload)
+        end
+    end
+
+    local function ensureInventoryFrame(swep)
+        if IsValid(inventoryFrames[swep]) then return inventoryFrames[swep] end
+
+        local frame = vgui.Create("DFrame")
+        frame:SetSize(860, 200)
+        frame:SetTitle("")
+        frame:ShowCloseButton(false)
+        frame:SetDraggable(false)
+        frame:MakePopup()
+        frame:SetPos((ScrW() - frame:GetWide()) / 2, ScrH() - frame:GetTall() - 10)
+        frame.Paint = function(self, w, h)
+            draw.RoundedBox(12, 0, 0, w, h, bg)
+            surface.SetDrawColor(accent)
+            surface.DrawRect(0, 0, w, 3)
+            draw.SimpleText("Inventory", "DubzInv_Label", 10, 10, textColor, TEXT_ALIGN_LEFT, TEXT_ALIGN_TOP)
+        end
+
+        local close = vgui.Create("DButton", frame)
+        close:SetText("✕")
+        close:SetFont("DubzInv_Button")
+        close:SetTextColor(textColor)
+        close:SetSize(30, 22)
+        close:SetPos(frame:GetWide() - 36, 8)
+        close.Paint = function(self, w, h)
+            draw.RoundedBox(6, 0, 0, w, h, panelCol)
+        end
+        close.DoClick = function()
+            frame:Close()
+        end
+
+        frame.OnClose = function()
+            inventoryFrames[swep] = nil
+        end
+
+        local info = vgui.Create("DLabel", frame)
+        info:SetPos(14, 28)
+        info:SetSize(600, 16)
+        info:SetTextColor(ColorAlpha(textColor, 160))
+        info:SetFont("DubzInv_Small")
+        info:SetText("Left click items on ground to store. Secondary drops last. R opens this panel.")
+
+        local label = vgui.Create("DLabel", frame)
+        label:SetPos(frame:GetWide() - 200, 28)
+        label:SetSize(180, 16)
+        label:SetTextColor(ColorAlpha(textColor, 200))
+        label:SetFont("DubzInv_Small")
+        label:SetText("")
+        frame.ItemLabel = label
+
+        local grid = buildGrid(frame)
+        frame.Grid = grid
+
+        inventoryFrames[swep] = frame
+        return frame
+    end
+
+    local function refreshTradeFrame()
+        local frame = tradeState.frame
+        if not IsValid(frame) then return end
+
+        frame.MyReady:SetText(tradeState.myReady and "Ready" or "Not ready")
+        frame.PartnerReady:SetText(tradeState.partnerReady and "Partner ready" or "Partner not ready")
+        frame.MyReady:SetTextColor(tradeState.myReady and Color(100, 255, 140) or textColor)
+        frame.PartnerReady:SetTextColor(tradeState.partnerReady and Color(100, 255, 140) or textColor)
+
+        frame.MyOffer:Clear()
+        frame.MyOffer:Receiver("DubzInvItem", function(_, panels, dropped)
+            if not dropped then return end
+            local payload = panels[1] and panels[1].DragPayload
+            if not payload or payload.type ~= "inventory" then return end
+            local maxAmt = payload.data.quantity or 1
+            Derma_StringRequest("Offer", "How many do you want to offer?", tostring(maxAmt), function(text)
+                local amt = math.Clamp(tonumber(text) or 1, 1, maxAmt)
+                sendTradeAction("offer", payload.index, amt)
+            end)
+        end)
+
+        for idx, data in ipairs(tradeState.myOffer or {}) do
+            local payload = {type = "offer", owner = LocalPlayer(), index = idx, data = data}
+            createItemTile(frame.MyOffer, data, nil, nil, payload)
+        end
+
+        frame.PartnerOffer:Clear()
+        for _, data in ipairs(tradeState.partnerOffer or {}) do
+            createItemTile(frame.PartnerOffer, data)
+        end
+
+        if tradeState.swep then
+            refreshInventoryFrame(tradeState.swep)
+        end
+    end
+
+    local function openTradeFrame(partner)
+        if IsValid(tradeState.frame) then
+            tradeState.frame:Close()
+        end
+
+        local frame = vgui.Create("DFrame")
+        frame:SetSize(940, 420)
+        frame:Center()
+        frame:SetTitle("")
+        frame:ShowCloseButton(false)
+        frame:MakePopup()
+        frame.Paint = function(self, w, h)
+            draw.RoundedBox(12, 0, 0, w, h, bg)
+            surface.SetDrawColor(accent)
+            surface.DrawRect(0, 0, w, 3)
+            draw.SimpleText("Trading with " .. (IsValid(partner) and partner:Nick() or "player"), "DubzInv_Title", 14, 10,
+                textColor)
+        end
+
+        local close = vgui.Create("DButton", frame)
+        close:SetText("✕")
+        close:SetFont("DubzInv_Button")
+        close:SetTextColor(textColor)
+        close:SetSize(32, 22)
+        close:SetPos(frame:GetWide() - 40, 8)
+        close.Paint = function(self, w, h)
+            draw.RoundedBox(6, 0, 0, w, h, panelCol)
+        end
+        close.DoClick = function()
+            sendTradeAction("cancel")
+            frame:Close()
+        end
+
+        local offers = vgui.Create("DPanel", frame)
+        offers:Dock(TOP)
+        offers:SetTall(200)
+        offers:DockMargin(10, 40, 10, 10)
+        offers.Paint = function(self, w, h)
+            drawPanelOutline(w, h)
+            draw.SimpleText("Your offer", "DubzInv_Button", 16, 8, textColor)
+            draw.SimpleText("Their offer", "DubzInv_Button", w / 2 + 16, 8, textColor)
+        end
+
+        local left = vgui.Create("DPanel", offers)
+        left:Dock(LEFT)
+        left:SetWide(offers:GetWide() / 2)
+        left:DockMargin(8, 28, 4, 8)
+        left.Paint = nil
+
+        local right = vgui.Create("DPanel", offers)
+        right:Dock(FILL)
+        right:DockMargin(4, 28, 8, 8)
+        right.Paint = nil
+
+        local myOffer = buildGrid(left)
+        local partnerOffer = buildGrid(right)
+
+        frame.MyOffer = myOffer
+        frame.PartnerOffer = partnerOffer
+
+        local status = vgui.Create("DPanel", frame)
+        status:Dock(TOP)
+        status:SetTall(50)
+        status:DockMargin(10, 0, 10, 0)
+        status.Paint = nil
+
+        local myReady = vgui.Create("DLabel", status)
+        myReady:SetFont("DubzInv_Button")
+        myReady:SetTextColor(textColor)
+        myReady:SetPos(10, 10)
+        myReady:SetSize(200, 24)
+        myReady:SetText("Not ready")
+        frame.MyReady = myReady
+
+        local partnerReady = vgui.Create("DLabel", status)
+        partnerReady:SetFont("DubzInv_Button")
+        partnerReady:SetTextColor(textColor)
+        partnerReady:SetPos(220, 10)
+        partnerReady:SetSize(220, 24)
+        partnerReady:SetText("Partner not ready")
+        frame.PartnerReady = partnerReady
+
+        local toggleReady = vgui.Create("DButton", status)
+        toggleReady:SetSize(140, 30)
+        toggleReady:SetPos(frame:GetWide() - 160, 10)
+        toggleReady:SetText("Toggle ready")
+        toggleReady:SetFont("DubzInv_Button")
+        toggleReady:SetTextColor(textColor)
+        toggleReady.Paint = function(self, w, h)
+            draw.RoundedBox(8, 0, 0, w, h, panelCol)
+        end
+        toggleReady.DoClick = function()
+            sendTradeAction("ready", not tradeState.myReady)
+        end
+
+        local invWrap = vgui.Create("DPanel", frame)
+        invWrap:Dock(FILL)
+        invWrap:DockMargin(10, 6, 10, 10)
+        invWrap.Paint = function(self, w, h)
+            drawPanelOutline(w, h)
+            draw.SimpleText("Your inventory", "DubzInv_Button", 12, 8, textColor)
+        end
+
+        local invGrid = buildGrid(invWrap)
+        invGrid:Receiver("DubzInvItem", function(_, panels, dropped)
+            if not dropped then return end
+            local payload = panels[1] and panels[1].DragPayload
+            if not payload or payload.type ~= "offer" then return end
+            if payload.owner ~= LocalPlayer() then return end
+            local maxAmt = payload.data.quantity or 1
+            Derma_StringRequest("Retrieve", "Take how many back?", tostring(maxAmt), function(text)
+                local amt = math.Clamp(tonumber(text) or 1, 1, maxAmt)
+                sendTradeAction("retrieve", payload.index, amt)
+            end)
+        end)
+
+        frame.InventoryGrid = invGrid
+
+        frame.OnClose = function()
+            if tradeState.id then
+                sendTradeAction("cancel")
+            end
+            tradeState.frame = nil
+            tradeState.id = nil
+            tradeState.partner = nil
+            tradeState.myOffer = {}
+            tradeState.partnerOffer = {}
+            tradeState.myReady = false
+            tradeState.partnerReady = false
+            tradeState.swep = nil
+        end
+
+        tradeState.frame = frame
+        refreshTradeFrame()
+    end
+
+    local function refreshTradeInventory()
+        if not (tradeState.swep and IsValid(tradeState.frame) and IsValid(tradeState.frame.InventoryGrid)) then return end
+        local items = inventoryData[tradeState.swep] or {}
+        local grid = tradeState.frame.InventoryGrid
+        grid:Clear()
+        for idx, data in ipairs(items) do
+            local payload = {type = "inventory", swep = tradeState.swep, index = idx, data = data}
+            createItemTile(grid, data, tradeState.swep, idx, payload)
+        end
     end
 
     net.Receive("DubzInventory_Tip", function()
@@ -753,99 +1420,86 @@ if CLIENT then
         local count = net.ReadUInt(8)
         local items = {}
         for i = 1, count do
-            local subMaterialCount
-            local subMaterials = {}
-
-            items[i] = {
-                class = net.ReadString(),
-                name = net.ReadString(),
-                model = net.ReadString(),
-                quantity = net.ReadUInt(16),
-                itemType = net.ReadString(),
-                material = net.ReadString()
-            }
-
-            subMaterialCount = net.ReadUInt(5)
-            for _ = 1, subMaterialCount do
-                local idx = net.ReadUInt(5)
-                subMaterials[idx] = net.ReadString()
-            end
-
-            if not table.IsEmpty(subMaterials) then
-                items[i].subMaterials = subMaterials
-            end
+            items[i] = readNetItem()
         end
 
         if not IsValid(swep) then return end
 
-        local frames = DUBZ_INVENTORY.ActiveFrames or {}
+        inventoryData[swep] = items
 
-        local function ensureFrame()
-            if IsValid(frames[swep]) then return frames[swep] end
+        local frame = ensureInventoryFrame(swep)
+        refreshInventoryFrame(swep)
 
-            local frame = vgui.Create("DFrame")
-            frame:SetSize(700, 520)
-            frame:Center()
-            frame:MakePopup()
-            frame:SetTitle("")
-            frame:ShowCloseButton(false)
-            frame.Paint = function(self, w, h)
-                draw.RoundedBox(12, 0, 0, w, h, bg)
-                draw.SimpleText("Dubz Inventory", "DubzInv_Title", 14, 10, textColor)
-                draw.SimpleText(string.format("%d / %d stacks", self.ItemCount or 0, config.Capacity), "DubzInv_Button", 16, 42, ColorAlpha(textColor, 180))
-                surface.SetDrawColor(accent)
-                surface.DrawRect(0, 0, w, 3)
-            end
+        if tradeState.swep == swep then
+            refreshTradeInventory()
+        end
+    end)
 
-            local close = vgui.Create("DButton", frame)
-            close:SetText("✕")
-            close:SetFont("DubzInv_Title")
-            close:SetTextColor(textColor)
-            close:SetSize(34, 34)
-            close:SetPos(frame:GetWide() - 44, 10)
-            close.Paint = function(self, w, h)
-                draw.RoundedBox(8, 0, 0, w, h, panelCol)
-            end
-            close.DoClick = function()
-                frame:Close()
-            end
+    net.Receive("DubzInventory_TradeInvite", function()
+        local requester = net.ReadEntity()
+        if not IsValid(requester) then return end
 
-            frame.OnClose = function()
-                frames[swep] = nil
-            end
+        Derma_Query(requester:Nick() .. " wants to trade", "Trade Request",
+            "Accept", function()
+                net.Start("DubzInventory_TradeReply")
+                net.WriteEntity(requester)
+                net.WriteBool(true)
+                net.SendToServer()
+            end,
+            "Decline", function()
+                net.Start("DubzInventory_TradeReply")
+                net.WriteEntity(requester)
+                net.WriteBool(false)
+                net.SendToServer()
+            end)
+    end)
 
-            local body = vgui.Create("DPanel", frame)
-            body:Dock(FILL)
-            body:DockMargin(12, 70, 12, 12)
-            body.Paint = nil
+    net.Receive("DubzInventory_TradeStart", function()
+        tradeState.id = net.ReadString()
+        tradeState.partner = net.ReadEntity()
+        tradeState.swep = LocalPlayer():GetWeapon("dubz_inventory")
+        openTradeFrame(tradeState.partner)
+        refreshTradeInventory()
+    end)
 
-            local info = vgui.Create("DLabel", body)
-            info:Dock(TOP)
-            info:SetTall(26)
-            info:SetFont("DubzInv_Button")
-            info:SetTextColor(ColorAlpha(textColor, 180))
-            info:SetText("Left click items on the ground to store them. Secondary drops last. Reload opens this menu.")
-            frame.Info = info
+    net.Receive("DubzInventory_TradeSync", function()
+        local id = net.ReadString()
+        if tradeState.id ~= id then return end
 
-            local grid = buildSection(body, "Inventory")
-            frame.Grid = grid
+        tradeState.partner = net.ReadEntity()
+        tradeState.myReady = net.ReadBool()
+        tradeState.partnerReady = net.ReadBool()
 
-            frame.Refresh = function(self, itemList)
-                self.ItemCount = #itemList
-                self.Grid:Clear()
-                for idx, data in ipairs(itemList) do
-                    addItemIcon(self.Grid, data, idx, swep)
-                end
-            end
-
-            frames[swep] = frame
-            return frame
+        local myCount = net.ReadUInt(8)
+        local mine = {}
+        for i = 1, myCount do
+            mine[i] = readNetItem()
         end
 
-        local frame = ensureFrame()
-        DUBZ_INVENTORY.ActiveFrames = frames
-        if IsValid(frame) then
-            frame:Refresh(items)
+        local theirCount = net.ReadUInt(8)
+        local theirs = {}
+        for i = 1, theirCount do
+            theirs[i] = readNetItem()
+        end
+
+        tradeState.myOffer = mine
+        tradeState.partnerOffer = theirs
+        refreshTradeFrame()
+    end)
+
+    net.Receive("DubzInventory_TradeEnd", function()
+        local id = net.ReadString()
+        local message = net.ReadString()
+        if tradeState.id ~= id then return end
+
+        if message ~= "" then
+            notification.AddLegacy(message, NOTIFY_GENERIC, 4)
+        end
+
+        if IsValid(tradeState.frame) then
+            tradeState.frame:Close()
+        else
+            tradeState.id = nil
         end
     end)
 end
