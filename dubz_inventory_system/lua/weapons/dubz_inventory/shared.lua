@@ -13,7 +13,7 @@ SWEP.ViewModel = "models/weapons/c_arms_citizen.mdl"
 SWEP.WorldModel = "models/weapons/w_toolgun.mdl"
 SWEP.UseHands = true
 SWEP.ViewModelFOV = 62
-SWEP.DrawCrosshair = false
+SWEP.DrawCrosshair = true
 
 SWEP.Primary.ClipSize = -1
 SWEP.Primary.DefaultClip = -1
@@ -305,8 +305,6 @@ if SERVER then
         end
 
         sendTip(ply, string.format("Dropped %s", removed.name or "item"))
-
-        DUBZ_INVENTORY.OpenFor(ply, swep)
     end
 
     function SWEP:SecondaryAttack()
@@ -489,13 +487,6 @@ if CLIENT then
     local panelCol = config.ColorPanel or Color(24, 28, 38)
     local accent = config.ColorAccent or Color(25, 178, 208)
     local textColor = config.ColorText or Color(230, 234, 242)
-
-    function SWEP:DrawHUD()
-        local x, y = ScrW() / 2, ScrH() / 2
-        surface.SetDrawColor(accent)
-        surface.DrawCircle(x, y, 4, accent)
-        surface.DrawCircle(x, y, 8, ColorAlpha(accent, 160))
-    end
 
     surface.CreateFont("DubzInv_Title", {
         font = "Montserrat",
