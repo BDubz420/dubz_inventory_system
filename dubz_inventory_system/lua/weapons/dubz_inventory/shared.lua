@@ -532,7 +532,15 @@ if CLIENT then
         wrap.Paint = function(self, w, h)
             drawPanelOutline(w, h)
             draw.SimpleText(header, "DubzInv_Label", 12, 10, textColor, TEXT_ALIGN_LEFT, TEXT_ALIGN_TOP)
-            draw.SimpleText("Right click items for options", "DubzInv_Small", 14, 32, ColorAlpha(textColor, 160), TEXT_ALIGN_LEFT, TEXT_ALIGN_TOP)
+            draw.SimpleText(
+                "Right click items for options",
+                "DubzInv_Small",
+                14,
+                32,
+                ColorAlpha(textColor, 160),
+                TEXT_ALIGN_LEFT,
+                TEXT_ALIGN_TOP
+            )
         end
 
         local layout = vgui.Create("DIconLayout", wrap)
