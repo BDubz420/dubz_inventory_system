@@ -952,6 +952,8 @@ if CLIENT then
     local panelCol = config.ColorPanel or Color(24, 28, 38)
     local accent = config.ColorAccent or Color(25, 178, 208)
     local textColor = config.ColorText or Color(230, 234, 242)
+    local tileW, tileH, tileSpacing = 92, 110, 8
+    local framePad, headerH = 12, 46
 
     surface.CreateFont("DubzInv_Title", {
         font = "Montserrat",
@@ -1035,20 +1037,20 @@ if CLIENT then
 
     local function createItemTile(layout, data, swep, index, payload)
         local panel = layout:Add("DPanel")
-        panel:SetSize(92, 110)
+        panel:SetSize(tileW, tileH)
         panel.DragPayload = payload
         panel:Droppable("DubzInvItem")
         panel.Paint = function(self, w, h)
             draw.RoundedBox(8, 0, 0, w, h, bg)
-            draw.SimpleText(data.name, "DubzInv_Small", w / 2, h - 18, textColor, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
-            draw.SimpleText("x" .. (data.quantity or 1), "DubzInv_Small", w / 2, h - 5, ColorAlpha(textColor, 170), TEXT_ALIGN_CENTER,
-                TEXT_ALIGN_CENTER)
+            draw.SimpleText(data.name, "DubzInv_Small", w / 2, h - 20, textColor, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+            draw.SimpleText("x" .. (data.quantity or 1), "DubzInv_Small", w / 2, h - 7, ColorAlpha(textColor, 170),
+                TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
         end
 
         local icon = vgui.Create("SpawnIcon", panel)
         icon:SetModel(data.model ~= "" and data.model or "models/props_junk/PopCan01a.mdl")
         icon:SetPos(6, 6)
-        icon:SetSize(80, 80)
+        icon:SetSize(tileW - 12, tileW - 12)
         icon:SetTooltip(nil)
         icon.PaintOver = function(_, w, h)
             surface.SetDrawColor(accent)
@@ -1135,13 +1137,33 @@ if CLIENT then
         net.SendToServer()
     end
 
-    local function buildGrid(parent)
+    local function buildGrid(parent, opts)
+        opts = opts or {}
         local grid = vgui.Create("DIconLayout", parent)
-        grid:SetSpaceX(6)
-        grid:SetSpaceY(6)
-        grid:Dock(FILL)
-        grid:DockMargin(10, 36, 10, 10)
+        grid:SetSpaceX(opts.spaceX or tileSpacing)
+        grid:SetSpaceY(opts.spaceY or tileSpacing)
+
+        if opts.noDock then
+            grid:SetSize(opts.w or parent:GetWide(), opts.h or parent:GetTall())
+            grid:SetPos(opts.x or 0, opts.y or 0)
+        else
+            grid:Dock(FILL)
+            grid:DockMargin(opts.margin or 10, opts.top or 36, opts.margin or 10, opts.bottom or 10)
+        end
+
         return grid
+    end
+
+    local function inventoryGridMetrics()
+        local capacity = math.max(config.Capacity or 10, 1)
+        local availableWidth = ScrW() - 80 - (framePad * 2)
+        local maxCols = math.max(3, math.floor((availableWidth + tileSpacing) / (tileW + tileSpacing)))
+        local cols = math.Clamp(capacity, 1, maxCols)
+        local rows = math.max(1, math.ceil(capacity / cols))
+        local gridW = cols * tileW + (cols - 1) * tileSpacing
+        local gridH = rows * tileH + (rows - 1) * tileSpacing
+
+        return cols, rows, gridW, gridH
     end
 
     local function refreshInventoryFrame(swep)
@@ -1173,8 +1195,12 @@ if CLIENT then
     local function ensureInventoryFrame(swep)
         if IsValid(inventoryFrames[swep]) then return inventoryFrames[swep] end
 
+        local cols, rows, gridW, gridH = inventoryGridMetrics()
+        local frameW = gridW + framePad * 2
+        local frameH = headerH + gridH + framePad * 2
+
         local frame = vgui.Create("DFrame")
-        frame:SetSize(860, 200)
+        frame:SetSize(frameW, frameH)
         frame:SetTitle("")
         frame:ShowCloseButton(false)
         frame:SetDraggable(false)
@@ -1184,15 +1210,18 @@ if CLIENT then
             draw.RoundedBox(12, 0, 0, w, h, bg)
             surface.SetDrawColor(accent)
             surface.DrawRect(0, 0, w, 3)
-            draw.SimpleText("Inventory", "DubzInv_Label", 10, 10, textColor, TEXT_ALIGN_LEFT, TEXT_ALIGN_TOP)
+
+            draw.RoundedBox(10, framePad, framePad, w - framePad * 2, headerH - 10, ColorAlpha(panelCol, 220))
+            draw.SimpleText("Inventory", "DubzInv_Title", framePad + 8, framePad + 6, textColor, TEXT_ALIGN_LEFT,
+                TEXT_ALIGN_TOP)
         end
 
         local close = vgui.Create("DButton", frame)
         close:SetText("✕")
         close:SetFont("DubzInv_Button")
         close:SetTextColor(textColor)
-        close:SetSize(30, 22)
-        close:SetPos(frame:GetWide() - 36, 8)
+        close:SetSize(32, 24)
+        close:SetPos(frame:GetWide() - framePad - 32, framePad + 6)
         close.Paint = function(self, w, h)
             draw.RoundedBox(6, 0, 0, w, h, panelCol)
         end
@@ -1205,21 +1234,40 @@ if CLIENT then
         end
 
         local info = vgui.Create("DLabel", frame)
-        info:SetPos(14, 28)
-        info:SetSize(600, 16)
+        info:SetPos(framePad + 8, framePad + 24)
+        info:SetSize(frame:GetWide() - framePad * 2, 16)
         info:SetTextColor(ColorAlpha(textColor, 160))
         info:SetFont("DubzInv_Small")
         info:SetText("Left click items on ground to store. Secondary drops last. R opens this panel.")
 
         local label = vgui.Create("DLabel", frame)
-        label:SetPos(frame:GetWide() - 200, 28)
+        label:SetPos(frame:GetWide() - framePad - 200, framePad + 24)
         label:SetSize(180, 16)
         label:SetTextColor(ColorAlpha(textColor, 200))
         label:SetFont("DubzInv_Small")
         label:SetText("")
         frame.ItemLabel = label
 
-        local grid = buildGrid(frame)
+        local gridWrap = vgui.Create("DPanel", frame)
+        gridWrap:SetSize(gridW, gridH)
+        gridWrap:SetPos((frame:GetWide() - gridW) / 2, framePad + headerH)
+        gridWrap.Paint = function(_, w, h)
+            draw.RoundedBox(12, 0, 0, w, h, ColorAlpha(panelCol, 230))
+            surface.SetDrawColor(ColorAlpha(accent, 60))
+            surface.DrawOutlinedRect(0, 0, w, h, 1)
+
+            for r = 0, rows - 1 do
+                for c = 0, cols - 1 do
+                    local x = c * (tileW + tileSpacing)
+                    local y = r * (tileH + tileSpacing)
+                    draw.RoundedBox(6, x, y, tileW, tileH, Color(0, 0, 0, 120))
+                    surface.SetDrawColor(ColorAlpha(accent, 30))
+                    surface.DrawOutlinedRect(x, y, tileW, tileH, 1)
+                end
+            end
+        end
+
+        local grid = buildGrid(gridWrap, {noDock = true, w = gridW, h = gridH, spaceX = tileSpacing, spaceY = tileSpacing})
         frame.Grid = grid
 
         inventoryFrames[swep] = frame
